@@ -9,7 +9,6 @@ class Settings(BaseSettings):
     app_name: str = "Escrow FX Marketplace API"
     api_v1_prefix: str = "/api/v1"
     debug: bool = False
-    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/escrow_fx_marketplace"
 
     model_config = SettingsConfigDict(
         env_file=".env",
