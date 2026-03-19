@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from decimal import Decimal
+from uuid import uuid4
+
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.domain.enums import CorridorStatus, CurrencyStatus, RailStatus
-from app.domain.exceptions import ConflictError, NotFoundError
+from app.domain.exceptions import ConflictError, InvariantViolationError, NotFoundError
+from app.domain.value_objects import Money, Rate
 from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
+from app.models.corridor import CorridorModel, CorridorRailModel
 from app.repositories.sqlalchemy import (
     SqlAlchemyCorridorRailRepository,
     SqlAlchemyCorridorRepository,
@@ -88,6 +94,25 @@ async def test_repository_conflicts_raise_domain_conflict(session: AsyncSession)
 
 
 @pytest.mark.anyio
+async def test_repository_getters_raise_not_found_for_missing_records(session: AsyncSession) -> None:
+    user_repository = SqlAlchemyUserRepository(session)
+    currency_repository = SqlAlchemyCurrencyRepository(session)
+    corridor_repository = SqlAlchemyCorridorRepository(session)
+
+    with pytest.raises(NotFoundError):
+        await user_repository.get(uuid4())
+
+    with pytest.raises(NotFoundError):
+        await user_repository.get_by_email("missing@example.com")
+
+    with pytest.raises(NotFoundError):
+        await currency_repository.get_by_code("ZZZ")
+
+    with pytest.raises(NotFoundError):
+        await corridor_repository.get(uuid4())
+
+
+@pytest.mark.anyio
 async def test_unit_of_work_rolls_back_when_an_error_occurs(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -104,12 +129,43 @@ async def test_unit_of_work_rolls_back_when_an_error_occurs(
 
 
 @pytest.mark.anyio
+async def test_deleting_a_corridor_deletes_its_rails_via_orm_cascade(session: AsyncSession) -> None:
+    currency_repository = SqlAlchemyCurrencyRepository(session)
+    from_currency = await currency_repository.add(build_currency(code="USD"))
+    to_currency = await currency_repository.add(build_currency(code="NGN"))
+
+    corridor = CorridorModel(
+        from_currency_id=from_currency.id,
+        to_currency_id=to_currency.id,
+        status=CorridorStatus.ACTIVE,
+        funding_sla_minutes=30,
+        fee_model_name="default",
+        rails=[
+            CorridorRailModel(
+                flow_type="funding",
+                priority_order=1,
+                provider="paystack",
+                method="bank_transfer",
+                status=RailStatus.ACTIVE,
+            )
+        ],
+    )
+    session.add(corridor)
+    await session.flush()
+    corridor_id = corridor.id
+
+    await session.delete(corridor)
+    await session.flush()
+
+    rail_rows = await session.execute(
+        select(CorridorRailModel).where(CorridorRailModel.corridor_id == corridor_id)
+    )
+
+    assert rail_rows.scalars().all() == []
+
+
+@pytest.mark.anyio
 async def test_value_objects_are_strictly_validated() -> None:
-    from decimal import Decimal
-
-    from app.domain.exceptions import InvariantViolationError
-    from app.domain.value_objects import Money, Rate
-
     money = Money(amount=Decimal("125.50"), currency_code="usd")
     rate = Rate(value=Decimal("1500.25"))
 
@@ -118,3 +174,9 @@ async def test_value_objects_are_strictly_validated() -> None:
 
     with pytest.raises(InvariantViolationError):
         Money(amount=Decimal("-1"), currency_code="usd")
+
+    with pytest.raises(InvariantViolationError):
+        Rate(value=Decimal("0"))
+
+    with pytest.raises(InvariantViolationError):
+        Money(amount=Decimal("NaN"), currency_code="usd")
