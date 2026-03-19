@@ -44,6 +44,18 @@ The detailed product and system plan lives in [`docs/escrow-plan.md`](docs/escro
 - `pytest` for tests
 - `pre-commit` for local automation
 
+## Persistence
+
+- Async SQLAlchemy 2.0 for runtime persistence
+- Alembic for schema migrations
+- Problem Details style API errors with centralized exception handling
+
+Run the latest migration with:
+
+```bash
+.venv/bin/alembic upgrade head
+```
+
 ## Run
 
 ```bash
