@@ -23,6 +23,10 @@ class UserRepositoryProtocol(ABC):
     async def get_by_email(self, email: str) -> User:
         """Fetch a user by email address."""
 
+    @abstractmethod
+    async def update(self, user: User) -> User:
+        """Persist changes to an existing user."""
+
 
 class CurrencyRepositoryProtocol(ABC):
     """Currency repository contract."""
@@ -66,4 +70,3 @@ class CorridorRailRepositoryProtocol(ABC):
     @abstractmethod
     async def list_for_corridor(self, corridor_id: UUID) -> list[CorridorRail]:
         """List corridor rails by corridor."""
-

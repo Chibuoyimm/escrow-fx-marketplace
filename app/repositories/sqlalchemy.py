@@ -47,6 +47,7 @@ class SqlAlchemyUserRepository(SqlAlchemyRepository, UserRepositoryProtocol):
         model = UserModel(
             id=user.id,
             email=user.email,
+            password_hash=user.password_hash,
             phone=user.phone,
             country=user.country,
             role=user.role,
@@ -72,6 +73,24 @@ class SqlAlchemyUserRepository(SqlAlchemyRepository, UserRepositoryProtocol):
         model = result.scalar_one_or_none()
         if model is None:
             raise NotFoundError(f"User with email '{email}' was not found.")
+        return model.to_domain()
+
+    async def update(self, user: User) -> User:
+        model = await self.session.get(UserModel, user.id)
+        if model is None:
+            raise NotFoundError(f"User '{user.id}' was not found.")
+
+        model.email = user.email
+        model.password_hash = user.password_hash
+        model.phone = user.phone
+        model.country = user.country
+        model.role = user.role
+        model.status = user.status
+        model.kyc_status = user.kyc_status
+        model.risk_level = user.risk_level
+        model.updated_at = user.updated_at
+
+        await self._flush_or_raise_conflict("A user with that email already exists.")
         return model.to_domain()
 
 

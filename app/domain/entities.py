@@ -25,6 +25,7 @@ class User:
 
     id: UUID
     email: str
+    password_hash: str
     phone: str | None
     country: str
     role: UserRole

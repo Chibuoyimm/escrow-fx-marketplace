@@ -28,8 +28,10 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
 
     engine = create_engine(database_url)
     inspector = inspect(engine)
+    user_columns = {column["name"] for column in inspector.get_columns("users")}
 
     assert "users" in inspector.get_table_names()
     assert "currencies" in inspector.get_table_names()
     assert "corridors" in inspector.get_table_names()
     assert "corridor_rails" in inspector.get_table_names()
+    assert "password_hash" in user_columns
