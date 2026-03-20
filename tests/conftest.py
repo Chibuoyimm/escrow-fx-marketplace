@@ -63,6 +63,7 @@ def build_user(*, email: str = "user@example.com", user_id: UUID | None = None) 
     return User(
         id=user_id or uuid4(),
         email=email,
+        password_hash="hashed-password",
         phone="+2348000000000",
         country="NG",
         role=UserRole.CUSTOMER,

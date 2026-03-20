@@ -8,6 +8,7 @@ from dataclasses import dataclass
 class ErrorCode:
     """Stable machine-readable error codes."""
 
+    AUTHENTICATION_ERROR = "authentication_error"
     NOT_FOUND = "not_found"
     CONFLICT = "conflict"
     VALIDATION_ERROR = "validation_error"
@@ -26,6 +27,20 @@ class AppError(Exception):
     detail: str
     error_code: str
     status_code: int
+    headers: dict[str, str] | None = None
+
+
+class AuthenticationError(AppError):
+    """Raised when a caller cannot be authenticated."""
+
+    def __init__(self, detail: str = "Authentication required.") -> None:
+        super().__init__(
+            title="Authentication Error",
+            detail=detail,
+            error_code=ErrorCode.AUTHENTICATION_ERROR,
+            status_code=401,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 class NotFoundError(AppError):
@@ -86,4 +101,3 @@ class InvariantViolationError(AppError):
             error_code=ErrorCode.INVARIANT_VIOLATION,
             status_code=422,
         )
-

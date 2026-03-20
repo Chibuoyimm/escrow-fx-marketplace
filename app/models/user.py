@@ -16,6 +16,7 @@ class UserModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "users"
 
     email: Mapped[str] = mapped_column(String(320), unique=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
     country: Mapped[str] = mapped_column(String(2))
     role: Mapped[UserRole] = mapped_column(Enum(UserRole, native_enum=False, validate_strings=True))
@@ -34,6 +35,7 @@ class UserModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         return User(
             id=self.id,
             email=self.email,
+            password_hash=self.password_hash,
             phone=self.phone,
             country=self.country,
             role=self.role,
@@ -43,4 +45,3 @@ class UserModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             created_at=self.created_at,
             updated_at=self.updated_at,
         )
-

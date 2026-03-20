@@ -49,11 +49,18 @@ The detailed product and system plan lives in [`docs/escrow-plan.md`](docs/escro
 - Async SQLAlchemy 2.0 for runtime persistence
 - Alembic for schema migrations
 - Problem Details style API errors with centralized exception handling
+- JWT bearer auth with role-based authorization
 
 Run the latest migration with:
 
 ```bash
 .venv/bin/alembic upgrade head
+```
+
+Bootstrap the first admin user with:
+
+```bash
+.venv/bin/python -m app.bootstrap_admin create-admin --email admin@example.com --password "ChangeMe123!" --country NG
 ```
 
 ## Run

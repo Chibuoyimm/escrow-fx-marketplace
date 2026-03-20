@@ -46,7 +46,10 @@ async def handle_app_error(request: Request, exc: AppError) -> JSONResponse:
         error_code=exc.error_code,
         request_id=_request_id(request),
     )
-    return _response(problem)
+    response = _response(problem)
+    if exc.headers is not None:
+        response.headers.update(exc.headers)
+    return response
 
 
 async def handle_infrastructure_error(request: Request, exc: InfrastructureError) -> JSONResponse:

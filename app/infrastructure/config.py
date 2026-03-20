@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     api_v1_prefix: str = "/api/v1"
     debug: bool = False
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/escrow_fx_marketplace"
+    jwt_secret_key: str = "change-me-please-use-a-32-char-secret"
+    jwt_algorithm: str = "HS256"
+    access_token_expiry_minutes: int = 60
+    jwt_issuer: str = "escrow-fx-marketplace"
 
     model_config = SettingsConfigDict(
         env_file=".env",
