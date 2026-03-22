@@ -36,6 +36,35 @@ The detailed product and system plan lives in [`docs/escrow-plan.md`](docs/escro
    ```bash
    pip install -e ".[dev]"
    ```
+4. Create your local environment file:
+   ```bash
+   cp .env.example .env
+   ```
+
+## Local Database
+
+This repo includes a local PostgreSQL service via Docker Compose. The default
+`APP_DATABASE_URL` in `.env.example` is already aligned with it and uses port
+`5433` so it does not collide with a machine-level PostgreSQL instance that may
+already be using `5432`.
+
+Start Postgres with:
+
+```bash
+make db-up
+```
+
+Wait for the container to become healthy, then run the latest migration:
+
+```bash
+make migrate
+```
+
+If you want to inspect the database logs:
+
+```bash
+make db-logs
+```
 
 ## Quality Gates
 
@@ -54,7 +83,7 @@ The detailed product and system plan lives in [`docs/escrow-plan.md`](docs/escro
 Run the latest migration with:
 
 ```bash
-.venv/bin/alembic upgrade head
+make migrate
 ```
 
 Bootstrap the first admin user with:
@@ -66,5 +95,15 @@ Bootstrap the first admin user with:
 ## Run
 
 ```bash
-.venv/bin/uvicorn app.main:app --reload
+make run
+```
+
+The full local startup flow is:
+
+```bash
+source .venv/bin/activate
+cp .env.example .env
+make db-up
+make migrate
+make run
 ```

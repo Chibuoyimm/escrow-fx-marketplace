@@ -1,4 +1,4 @@
-.PHONY: format lint typecheck test
+.PHONY: format lint typecheck test db-up db-down db-logs migrate run
 
 format:
 	.venv/bin/ruff format .
@@ -12,3 +12,17 @@ typecheck:
 test:
 	.venv/bin/pytest
 
+db-up:
+	docker compose up -d postgres
+
+db-down:
+	docker compose down
+
+db-logs:
+	docker compose logs -f postgres
+
+migrate:
+	.venv/bin/alembic upgrade head
+
+run:
+	.venv/bin/uvicorn app.main:app --reload

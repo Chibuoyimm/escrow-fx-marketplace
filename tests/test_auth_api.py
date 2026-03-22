@@ -97,6 +97,21 @@ async def test_register_duplicate_email_returns_conflict(client: AsyncClient) ->
     assert second.json()["error_code"] == "conflict"
 
 
+async def test_register_rejects_non_alpha_country_code(client: AsyncClient) -> None:
+    response = await client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "invalid-country@example.com",
+            "password": "ChangeMe123!",
+            "country": "N1",
+            "phone": "+2348000000000",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error_code"] == "validation_error"
+
+
 async def test_login_succeeds_and_returns_bearer_token(client: AsyncClient) -> None:
     await client.post(
         "/api/v1/auth/register",

@@ -10,7 +10,12 @@ from uuid import UUID, uuid4
 from app.domain.auth import AuthenticatedPrincipal
 from app.domain.entities import User
 from app.domain.enums import KycStatus, RiskLevel, UserRole, UserStatus
-from app.domain.exceptions import AuthenticationError, ConflictError, NotFoundError
+from app.domain.exceptions import (
+    AuthenticationError,
+    ConflictError,
+    InvariantViolationError,
+    NotFoundError,
+)
 from app.infrastructure.database.session import AsyncSessionFactory
 from app.infrastructure.database.unit_of_work import AbstractUnitOfWork, SqlAlchemyUnitOfWork
 from app.infrastructure.security import SecurityService
@@ -22,6 +27,14 @@ UnitOfWorkFactory = Callable[[], AbstractUnitOfWork]
 def utc_now() -> datetime:
     """Return the current UTC time."""
     return datetime.now(UTC)
+
+
+def normalize_country_code(country: str) -> str:
+    """Normalize and validate an ISO-style country code."""
+    normalized_country = country.strip().upper()
+    if len(normalized_country) != 2 or not normalized_country.isalpha():
+        raise InvariantViolationError("Country must be a two-letter ISO-style country code.")
+    return normalized_country
 
 
 def build_uow() -> AbstractUnitOfWork:
@@ -50,7 +63,7 @@ class AuthService:
     ) -> User:
         """Register a new customer user."""
         normalized_email = email.lower().strip()
-        normalized_country = country.upper()
+        normalized_country = normalize_country_code(country)
         async with self._uow_factory() as uow:
             try:
                 await uow.users.get_by_email(normalized_email)
@@ -126,7 +139,7 @@ class AuthService:
     ) -> User:
         """Create an admin user, or promote one if it already exists."""
         normalized_email = email.lower().strip()
-        normalized_country = country.upper()
+        normalized_country = normalize_country_code(country)
         async with self._uow_factory() as uow:
             try:
                 user = await uow.users.get_by_email(normalized_email)
@@ -153,6 +166,7 @@ class AuthService:
                 user,
                 password_hash=self._security.hash_password(password),
                 role=UserRole.ADMIN,
+                kyc_status=KycStatus.VERIFIED,
                 updated_at=utc_now(),
             )
             saved = await uow.users.update(promoted)
@@ -167,6 +181,7 @@ class AuthService:
             updated = replace(
                 user,
                 role=UserRole.ADMIN,
+                kyc_status=KycStatus.VERIFIED,
                 password_hash=self._security.hash_password(password)
                 if password is not None
                 else user.password_hash,

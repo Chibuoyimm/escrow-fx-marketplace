@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.domain.entities import User
 from app.domain.enums import KycStatus, RiskLevel, UserRole, UserStatus
@@ -17,8 +17,16 @@ class RegisterUserRequest(BaseModel):
 
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
-    country: str = Field(min_length=2, max_length=2)
+    country: str = Field(min_length=2, max_length=2, pattern=r"^[A-Z]{2}$")
     phone: str | None = Field(default=None, min_length=7, max_length=32)
+
+    @field_validator("country", mode="before")
+    @classmethod
+    def normalize_country(cls, value: object) -> object:
+        """Normalize country codes before validation."""
+        if isinstance(value, str):
+            return value.strip().upper()
+        return value
 
 
 class LoginRequest(BaseModel):

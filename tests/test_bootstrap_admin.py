@@ -6,8 +6,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bootstrap_admin import build_parser, run_command
-from app.domain.enums import UserRole
-from app.domain.exceptions import NotFoundError
+from app.domain.enums import KycStatus, UserRole
+from app.domain.exceptions import InvariantViolationError, NotFoundError
 from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.security import SecurityService
 from app.services.auth import AuthService
@@ -41,6 +41,7 @@ async def test_bootstrap_command_creates_a_new_admin_when_missing(
 
     assert user.email == "admin@example.com"
     assert user.role is UserRole.ADMIN
+    assert user.kyc_status is KycStatus.VERIFIED
 
 
 @pytest.mark.anyio
@@ -68,6 +69,7 @@ async def test_bootstrap_command_promotes_an_existing_user(
 
     assert user.email == "existing@example.com"
     assert user.role is UserRole.ADMIN
+    assert user.kyc_status is KycStatus.VERIFIED
 
 
 @pytest.mark.anyio
@@ -99,6 +101,7 @@ async def test_create_admin_promotes_existing_user(
 
     assert user.email == "existing-admin@example.com"
     assert user.role is UserRole.ADMIN
+    assert user.kyc_status is KycStatus.VERIFIED
 
 
 @pytest.mark.anyio
@@ -131,4 +134,28 @@ async def test_run_command_rejects_unsupported_command(
     )
 
     with pytest.raises(ValueError, match="Unsupported bootstrap command"):
+        await run_command(args, build_auth_service(session_factory))
+
+
+@pytest.mark.anyio
+async def test_create_admin_rejects_non_alpha_country_code(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "create-admin",
+            "--email",
+            "admin@example.com",
+            "--password",
+            "ChangeMe123!",
+            "--country",
+            "N1",
+        ]
+    )
+
+    with pytest.raises(
+        InvariantViolationError,
+        match="Country must be a two-letter ISO-style country code.",
+    ):
         await run_command(args, build_auth_service(session_factory))
