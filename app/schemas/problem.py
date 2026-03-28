@@ -20,4 +20,3 @@ class ProblemDetails(BaseModel):
     error_code: str
     request_id: str | None = None
     errors: list[dict[str, Any]] | None = None
-

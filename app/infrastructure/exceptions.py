@@ -15,4 +15,3 @@ class InfrastructureError(Exception):
     detail: str
     error_code: str = ErrorCode.INFRASTRUCTURE_FAILURE
     status_code: int = 503
-

@@ -23,7 +23,9 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--country", required=True)
     create_parser.add_argument("--phone", default=None)
 
-    promote_parser = subparsers.add_parser("promote-admin", help="Promote an existing user to admin.")
+    promote_parser = subparsers.add_parser(
+        "promote-admin", help="Promote an existing user to admin."
+    )
     promote_parser.add_argument("--email", required=True)
     promote_parser.add_argument("--password", default=None)
 

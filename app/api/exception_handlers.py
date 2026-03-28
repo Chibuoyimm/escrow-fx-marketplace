@@ -91,7 +91,9 @@ async def handle_http_exception(request: Request, exc: StarletteHTTPException) -
         status=exc.status_code,
         detail=str(exc.detail),
         instance=_request_instance(request),
-        error_code=ErrorCode.INTERNAL_ERROR if exc.status_code >= 500 else ErrorCode.PRECONDITION_FAILED,
+        error_code=ErrorCode.INTERNAL_ERROR
+        if exc.status_code >= 500
+        else ErrorCode.PRECONDITION_FAILED,
         request_id=_request_id(request),
     )
     return _response(problem)

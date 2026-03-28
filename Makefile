@@ -1,4 +1,4 @@
-.PHONY: format lint typecheck test db-up db-down db-logs migrate run
+.PHONY: format lint typecheck test db-up db-down db-logs migrate run seed-reference-data
 
 format:
 	.venv/bin/ruff format .
@@ -26,3 +26,6 @@ migrate:
 
 run:
 	.venv/bin/uvicorn app.main:app --reload
+
+seed-reference-data:
+	.venv/bin/python -m app.seed_reference_data

@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from uuid import UUID
 
-from app.domain.entities import Corridor, CorridorRail, Currency, User
+from app.domain.entities import Corridor, CorridorDetails, CorridorRail, Currency, User
 
 
 class UserRepositoryProtocol(ABC):
@@ -54,6 +54,26 @@ class CorridorRepositoryProtocol(ABC):
     @abstractmethod
     async def get(self, corridor_id: UUID) -> Corridor:
         """Fetch a corridor by identifier."""
+
+    @abstractmethod
+    async def get_by_currency_pair(self, from_currency_id: UUID, to_currency_id: UUID) -> Corridor:
+        """Fetch a corridor by ordered currency pair."""
+
+    @abstractmethod
+    async def list_active_details(self) -> list[CorridorDetails]:
+        """List active corridors as read models."""
+
+    @abstractmethod
+    async def get_active_details(self, corridor_id: UUID) -> CorridorDetails:
+        """Fetch an active corridor read model by identifier."""
+
+    @abstractmethod
+    async def get_active_details_by_currency_pair(
+        self,
+        from_currency_code: str,
+        to_currency_code: str,
+    ) -> CorridorDetails:
+        """Fetch an active corridor read model by ordered currency pair."""
 
     @abstractmethod
     async def list_active(self) -> list[Corridor]:

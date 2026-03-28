@@ -15,4 +15,3 @@ class AuthenticatedPrincipal:
     user_id: UUID
     email: str
     role: UserRole
-

@@ -92,6 +92,12 @@ Bootstrap the first admin user with:
 .venv/bin/python -m app.bootstrap_admin create-admin --email admin@example.com --password "ChangeMe123!" --country NG
 ```
 
+Seed reference currencies and corridors with:
+
+```bash
+make seed-reference-data
+```
+
 ## Run
 
 ```bash

@@ -7,9 +7,10 @@ from uuid import UUID
 from sqlalchemy import Enum, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.domain.entities import Corridor, CorridorRail
+from app.domain.entities import Corridor, CorridorDetails, CorridorRail, CorridorRailDetails
 from app.domain.enums import CorridorStatus, FlowType, RailStatus
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.currency import CurrencyModel
 
 
 class CorridorModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -34,9 +35,12 @@ class CorridorModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     funding_sla_minutes: Mapped[int] = mapped_column(Integer)
     fee_model_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    from_currency: Mapped[CurrencyModel] = relationship(foreign_keys=[from_currency_id])
+    to_currency: Mapped[CurrencyModel] = relationship(foreign_keys=[to_currency_id])
     rails: Mapped[list[CorridorRailModel]] = relationship(
         back_populates="corridor",
         cascade="all, delete-orphan",
+        order_by="CorridorRailModel.priority_order",
     )
 
     def to_domain(self) -> Corridor:
@@ -50,6 +54,18 @@ class CorridorModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             fee_model_name=self.fee_model_name,
             created_at=self.created_at,
             updated_at=self.updated_at,
+        )
+
+    def to_details(self) -> CorridorDetails:
+        """Convert the ORM row and loaded relationships to a read model."""
+        return CorridorDetails(
+            id=self.id,
+            from_currency_code=self.from_currency.code,
+            to_currency_code=self.to_currency.code,
+            status=self.status,
+            funding_sla_minutes=self.funding_sla_minutes,
+            fee_model_name=self.fee_model_name,
+            rails=tuple(rail.to_details() for rail in self.rails),
         )
 
 
@@ -94,4 +110,14 @@ class CorridorRailModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             status=self.status,
             created_at=self.created_at,
             updated_at=self.updated_at,
+        )
+
+    def to_details(self) -> CorridorRailDetails:
+        """Convert the ORM row to a read model."""
+        return CorridorRailDetails(
+            flow_type=self.flow_type,
+            priority_order=self.priority_order,
+            provider=self.provider,
+            method=self.method,
+            status=self.status,
         )

@@ -62,4 +62,3 @@ class SecurityService:
             return AccessTokenClaims.model_validate(payload)
         except Exception as exc:
             raise AuthenticationError("Invalid authentication credentials.") from exc
-

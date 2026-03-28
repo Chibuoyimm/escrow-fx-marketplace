@@ -61,4 +61,3 @@ class FlowType(StrEnum):
 
     FUNDING = "funding"
     PAYOUT = "payout"
-

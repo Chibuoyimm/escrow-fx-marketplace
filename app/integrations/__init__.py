@@ -1,2 +1,1 @@
 """External provider integration layer."""
-

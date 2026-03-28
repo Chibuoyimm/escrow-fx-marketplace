@@ -41,4 +41,3 @@ class Rate:
         if normalized <= Decimal("0"):
             raise InvariantViolationError("Rates must be greater than zero.")
         object.__setattr__(self, "value", normalized)
-

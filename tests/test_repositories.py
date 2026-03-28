@@ -48,7 +48,9 @@ async def test_currency_repository_lists_only_active_records(session: AsyncSessi
 
 
 @pytest.mark.anyio
-async def test_corridor_and_rail_repositories_filter_inactive_records(session: AsyncSession) -> None:
+async def test_corridor_and_rail_repositories_filter_inactive_records(
+    session: AsyncSession,
+) -> None:
     currency_repository = SqlAlchemyCurrencyRepository(session)
     corridor_repository = SqlAlchemyCorridorRepository(session)
     rail_repository = SqlAlchemyCorridorRailRepository(session)
@@ -84,6 +86,53 @@ async def test_corridor_and_rail_repositories_filter_inactive_records(session: A
 
 
 @pytest.mark.anyio
+async def test_corridor_repository_gets_by_ordered_currency_pair(session: AsyncSession) -> None:
+    currency_repository = SqlAlchemyCurrencyRepository(session)
+    corridor_repository = SqlAlchemyCorridorRepository(session)
+
+    usd = await currency_repository.add(build_currency(code="USD"))
+    ngn = await currency_repository.add(build_currency(code="NGN"))
+    corridor = await corridor_repository.add(
+        build_corridor(from_currency_id=usd.id, to_currency_id=ngn.id)
+    )
+
+    fetched = await corridor_repository.get_by_currency_pair(usd.id, ngn.id)
+
+    assert fetched.id == corridor.id
+
+    with pytest.raises(NotFoundError):
+        await corridor_repository.get_by_currency_pair(ngn.id, usd.id)
+
+
+@pytest.mark.anyio
+async def test_corridor_repository_details_use_loaded_relationships(session: AsyncSession) -> None:
+    currency_repository = SqlAlchemyCurrencyRepository(session)
+    corridor_repository = SqlAlchemyCorridorRepository(session)
+    rail_repository = SqlAlchemyCorridorRailRepository(session)
+
+    usd = await currency_repository.add(build_currency(code="USD"))
+    ngn = await currency_repository.add(build_currency(code="NGN"))
+    corridor = await corridor_repository.add(
+        build_corridor(from_currency_id=usd.id, to_currency_id=ngn.id)
+    )
+    await rail_repository.add(build_corridor_rail(corridor_id=corridor.id, priority_order=1))
+    await rail_repository.add(
+        build_corridor_rail(
+            corridor_id=corridor.id,
+            priority_order=2,
+            status=RailStatus.INACTIVE,
+        )
+    )
+
+    detail = await corridor_repository.get_active_details_by_currency_pair("USD", "NGN")
+
+    assert detail.id == corridor.id
+    assert detail.from_currency_code == "USD"
+    assert detail.to_currency_code == "NGN"
+    assert [rail.priority_order for rail in detail.rails] == [1]
+
+
+@pytest.mark.anyio
 async def test_repository_conflicts_raise_domain_conflict(session: AsyncSession) -> None:
     repository = SqlAlchemyCurrencyRepository(session)
 
@@ -94,7 +143,9 @@ async def test_repository_conflicts_raise_domain_conflict(session: AsyncSession)
 
 
 @pytest.mark.anyio
-async def test_repository_getters_raise_not_found_for_missing_records(session: AsyncSession) -> None:
+async def test_repository_getters_raise_not_found_for_missing_records(
+    session: AsyncSession,
+) -> None:
     user_repository = SqlAlchemyUserRepository(session)
     currency_repository = SqlAlchemyCurrencyRepository(session)
     corridor_repository = SqlAlchemyCorridorRepository(session)

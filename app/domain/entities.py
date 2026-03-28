@@ -77,3 +77,27 @@ class CorridorRail:
     status: RailStatus
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class CorridorRailDetails:
+    """A customer-facing corridor rail projection."""
+
+    flow_type: FlowType
+    priority_order: int
+    provider: str
+    method: str
+    status: RailStatus
+
+
+@dataclass(frozen=True, slots=True)
+class CorridorDetails:
+    """A customer-facing corridor projection."""
+
+    id: UUID
+    from_currency_code: str
+    to_currency_code: str
+    status: CorridorStatus
+    funding_sla_minutes: int
+    fee_model_name: str | None
+    rails: tuple[CorridorRailDetails, ...]

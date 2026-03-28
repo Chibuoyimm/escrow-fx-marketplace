@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, and_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload, selectinload, with_loader_criteria
 
-from app.domain.entities import Corridor, CorridorRail, Currency, User
+from app.domain.entities import Corridor, CorridorDetails, CorridorRail, Currency, User
 from app.domain.enums import CorridorStatus, CurrencyStatus, RailStatus
 from app.domain.exceptions import ConflictError, NotFoundError
 from app.infrastructure.exceptions import InfrastructureError
@@ -113,7 +115,9 @@ class SqlAlchemyCurrencyRepository(SqlAlchemyRepository, CurrencyRepositoryProto
         return model.to_domain()
 
     async def get_by_code(self, code: str) -> Currency:
-        statement: Select[tuple[CurrencyModel]] = select(CurrencyModel).where(CurrencyModel.code == code)
+        statement: Select[tuple[CurrencyModel]] = select(CurrencyModel).where(
+            CurrencyModel.code == code
+        )
         result = await self.session.execute(statement)
         model = result.scalar_one_or_none()
         if model is None:
@@ -121,8 +125,10 @@ class SqlAlchemyCurrencyRepository(SqlAlchemyRepository, CurrencyRepositoryProto
         return model.to_domain()
 
     async def list_active(self) -> list[Currency]:
-        statement: Select[tuple[CurrencyModel]] = select(CurrencyModel).where(
-            CurrencyModel.status == CurrencyStatus.ACTIVE
+        statement: Select[tuple[CurrencyModel]] = (
+            select(CurrencyModel)
+            .where(CurrencyModel.status == CurrencyStatus.ACTIVE)
+            .order_by(CurrencyModel.code.asc())
         )
         result = await self.session.execute(statement)
         return [model.to_domain() for model in result.scalars().all()]
@@ -130,6 +136,19 @@ class SqlAlchemyCurrencyRepository(SqlAlchemyRepository, CurrencyRepositoryProto
 
 class SqlAlchemyCorridorRepository(SqlAlchemyRepository, CorridorRepositoryProtocol):
     """Corridor repository implementation."""
+
+    @staticmethod
+    def _details_load_options() -> tuple[Any, ...]:
+        return (
+            joinedload(CorridorModel.from_currency),
+            joinedload(CorridorModel.to_currency),
+            selectinload(CorridorModel.rails),
+            with_loader_criteria(
+                CorridorRailModel,
+                CorridorRailModel.status == RailStatus.ACTIVE,
+                include_aliases=True,
+            ),
+        )
 
     async def add(self, corridor: Corridor) -> Corridor:
         model = CorridorModel(
@@ -151,6 +170,79 @@ class SqlAlchemyCorridorRepository(SqlAlchemyRepository, CorridorRepositoryProto
         if model is None:
             raise NotFoundError(f"Corridor '{corridor_id}' was not found.")
         return model.to_domain()
+
+    async def get_by_currency_pair(self, from_currency_id: UUID, to_currency_id: UUID) -> Corridor:
+        statement: Select[tuple[CorridorModel]] = select(CorridorModel).where(
+            CorridorModel.from_currency_id == from_currency_id,
+            CorridorModel.to_currency_id == to_currency_id,
+        )
+        result = await self.session.execute(statement)
+        model = result.scalar_one_or_none()
+        if model is None:
+            raise NotFoundError("The requested corridor was not found.")
+        return model.to_domain()
+
+    async def list_active_details(self) -> list[CorridorDetails]:
+        statement: Select[tuple[CorridorModel]] = (
+            select(CorridorModel)
+            .options(*self._details_load_options())
+            .where(
+                CorridorModel.status == CorridorStatus.ACTIVE,
+                CorridorModel.from_currency.has(CurrencyModel.status == CurrencyStatus.ACTIVE),
+                CorridorModel.to_currency.has(CurrencyModel.status == CurrencyStatus.ACTIVE),
+            )
+        )
+        result = await self.session.execute(statement)
+        return [model.to_details() for model in result.unique().scalars().all()]
+
+    async def get_active_details(self, corridor_id: UUID) -> CorridorDetails:
+        statement: Select[tuple[CorridorModel]] = (
+            select(CorridorModel)
+            .options(*self._details_load_options())
+            .where(
+                CorridorModel.id == corridor_id,
+                CorridorModel.status == CorridorStatus.ACTIVE,
+                CorridorModel.from_currency.has(CurrencyModel.status == CurrencyStatus.ACTIVE),
+                CorridorModel.to_currency.has(CurrencyModel.status == CurrencyStatus.ACTIVE),
+            )
+        )
+        result = await self.session.execute(statement)
+        model = result.unique().scalar_one_or_none()
+        if model is None:
+            raise NotFoundError(f"Corridor '{corridor_id}' was not found.")
+        return model.to_details()
+
+    async def get_active_details_by_currency_pair(
+        self,
+        from_currency_code: str,
+        to_currency_code: str,
+    ) -> CorridorDetails:
+        statement: Select[tuple[CorridorModel]] = (
+            select(CorridorModel)
+            .options(*self._details_load_options())
+            .where(
+                CorridorModel.status == CorridorStatus.ACTIVE,
+                CorridorModel.from_currency.has(
+                    and_(
+                        CurrencyModel.code == from_currency_code,
+                        CurrencyModel.status == CurrencyStatus.ACTIVE,
+                    )
+                ),
+                CorridorModel.to_currency.has(
+                    and_(
+                        CurrencyModel.code == to_currency_code,
+                        CurrencyModel.status == CurrencyStatus.ACTIVE,
+                    )
+                ),
+            )
+        )
+        result = await self.session.execute(statement)
+        model = result.unique().scalar_one_or_none()
+        if model is None:
+            raise NotFoundError(
+                f"Corridor '{from_currency_code}/{to_currency_code}' was not found."
+            )
+        return model.to_details()
 
     async def list_active(self) -> list[Corridor]:
         statement: Select[tuple[CorridorModel]] = select(CorridorModel).where(
