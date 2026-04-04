@@ -16,6 +16,7 @@ from app.domain.enums import (
     KycStatus,
     RailStatus,
     RiskLevel,
+    TradeContractStatus,
     UserRole,
     UserStatus,
 )
@@ -163,5 +164,43 @@ class ExchangeOfferDetails:
     offered_rate: Decimal
     status: ExchangeOfferStatus
     expires_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class TradeContract:
+    """A locked trade created from an accepted offer."""
+
+    id: UUID
+    request_id: UUID
+    accepted_offer_id: UUID
+    agreed_rate: Decimal
+    reference_rate_snapshot: Decimal | None
+    from_amount: Decimal
+    to_amount: Decimal
+    funding_deadline_at: datetime
+    status: TradeContractStatus
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class TradeContractDetails:
+    """A participant-facing trade contract projection."""
+
+    id: UUID
+    request_id: UUID
+    accepted_offer_id: UUID
+    requester_user_id: UUID
+    counterparty_user_id: UUID
+    from_currency_code: str
+    to_currency_code: str
+    agreed_rate: Decimal
+    reference_rate_snapshot: Decimal | None
+    from_amount: Decimal
+    to_amount: Decimal
+    funding_deadline_at: datetime
+    status: TradeContractStatus
     created_at: datetime
     updated_at: datetime

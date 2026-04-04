@@ -14,6 +14,8 @@ from app.domain.entities import (
     ExchangeOfferDetails,
     ExchangeRequest,
     ExchangeRequestDetails,
+    TradeContract,
+    TradeContractDetails,
     User,
 )
 
@@ -142,9 +144,33 @@ class ExchangeOfferRepositoryProtocol(ABC):
         """Persist an exchange offer."""
 
     @abstractmethod
+    async def update(self, exchange_offer: ExchangeOffer) -> ExchangeOffer:
+        """Persist changes to an existing exchange offer."""
+
+    @abstractmethod
+    async def get(self, offer_id: UUID) -> ExchangeOffer:
+        """Fetch an exchange offer by identifier."""
+
+    @abstractmethod
+    async def list_for_request(self, request_id: UUID) -> list[ExchangeOffer]:
+        """List exchange offers for a request."""
+
+    @abstractmethod
     async def list_details_for_request(self, request_id: UUID) -> list[ExchangeOfferDetails]:
         """List exchange offer read models for a request."""
 
     @abstractmethod
     async def has_active_offer_for_request(self, request_id: UUID, user_id: UUID) -> bool:
         """Check whether a user already has an active offer on a request."""
+
+
+class TradeContractRepositoryProtocol(ABC):
+    """Trade contract repository contract."""
+
+    @abstractmethod
+    async def add(self, trade_contract: TradeContract) -> TradeContract:
+        """Persist a trade contract."""
+
+    @abstractmethod
+    async def get_for_participant(self, trade_id: UUID, user_id: UUID) -> TradeContractDetails:
+        """Fetch a trade contract visible to a participant."""

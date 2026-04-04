@@ -1,0 +1,151 @@
+"""Trade contract service layer."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
+
+from app.domain.entities import TradeContract, TradeContractDetails
+from app.domain.enums import (
+    CorridorStatus,
+    ExchangeOfferStatus,
+    ExchangeRequestStatus,
+    TradeContractStatus,
+)
+from app.domain.exceptions import AuthorizationError, InvariantViolationError, NotFoundError
+from app.infrastructure.database.session import AsyncSessionFactory
+from app.infrastructure.database.unit_of_work import (
+    AbstractUnitOfWork,
+    SqlAlchemyUnitOfWork,
+)
+
+UnitOfWorkFactory = Callable[[], AbstractUnitOfWork]
+
+
+def utc_now() -> datetime:
+    """Return the current UTC time."""
+    return datetime.now(UTC)
+
+
+def as_utc(value: datetime) -> datetime:
+    """Normalize datetimes returned by different DB backends."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def build_uow() -> AbstractUnitOfWork:
+    """Build the default unit of work."""
+    return SqlAlchemyUnitOfWork(AsyncSessionFactory)
+
+
+class TradeService:
+    """Application service for trade locking and participant reads."""
+
+    def __init__(self, uow_factory: UnitOfWorkFactory | None = None) -> None:
+        self._uow_factory = uow_factory or build_uow
+
+    async def accept_offer(
+        self,
+        *,
+        offer_id: UUID,
+        requester_user_id: UUID,
+    ) -> TradeContractDetails:
+        """Accept an offer and create the initial trade contract."""
+        current_time = utc_now()
+
+        async with self._uow_factory() as uow:
+            offer = await uow.exchange_offers.get(offer_id)
+            exchange_request = await uow.exchange_requests.get(offer.request_id)
+
+            if exchange_request.creator_user_id != requester_user_id:
+                raise AuthorizationError("Only the request creator can accept an offer.")
+            if exchange_request.status not in {
+                ExchangeRequestStatus.REQUEST_OPEN,
+                ExchangeRequestStatus.OFFER_PENDING,
+            }:
+                raise InvariantViolationError("This exchange request can no longer accept offers.")
+            if as_utc(exchange_request.expires_at) <= current_time:
+                raise InvariantViolationError("This exchange request has expired.")
+            if offer.status is not ExchangeOfferStatus.ACTIVE:
+                raise InvariantViolationError("This offer is no longer active.")
+            if as_utc(offer.expires_at) <= current_time:
+                raise InvariantViolationError("This offer has expired.")
+
+            try:
+                corridor = await uow.corridors.get_by_currency_pair(
+                    exchange_request.from_currency_id,
+                    exchange_request.to_currency_id,
+                )
+            except NotFoundError as exc:
+                raise InvariantViolationError(
+                    "The corridor required to lock this trade is no longer available."
+                ) from exc
+            if corridor.status is not CorridorStatus.ACTIVE:
+                raise InvariantViolationError(
+                    "The corridor required to lock this trade is no longer available."
+                )
+
+            trade_contract = await uow.trade_contracts.add(
+                TradeContract(
+                    id=uuid4(),
+                    request_id=exchange_request.id,
+                    accepted_offer_id=offer.id,
+                    agreed_rate=offer.offered_rate,
+                    reference_rate_snapshot=None,
+                    from_amount=exchange_request.from_amount,
+                    to_amount=exchange_request.from_amount * offer.offered_rate,
+                    funding_deadline_at=current_time
+                    + timedelta(minutes=corridor.funding_sla_minutes),
+                    status=TradeContractStatus.TERMS_LOCKED,
+                    created_at=current_time,
+                    updated_at=current_time,
+                )
+            )
+
+            await uow.exchange_requests.update(
+                replace(
+                    exchange_request,
+                    status=ExchangeRequestStatus.TERMS_LOCKED,
+                    updated_at=current_time,
+                )
+            )
+
+            offers = await uow.exchange_offers.list_for_request(exchange_request.id)
+            for existing_offer in offers:
+                if existing_offer.status is not ExchangeOfferStatus.ACTIVE:
+                    continue
+                new_status = (
+                    ExchangeOfferStatus.ACCEPTED
+                    if existing_offer.id == offer.id
+                    else ExchangeOfferStatus.REJECTED
+                )
+                await uow.exchange_offers.update(
+                    replace(
+                        existing_offer,
+                        status=new_status,
+                        updated_at=current_time,
+                    )
+                )
+
+            await uow.commit()
+            return await uow.trade_contracts.get_for_participant(
+                trade_contract.id,
+                requester_user_id,
+            )
+
+    async def get_trade_for_participant(
+        self,
+        trade_id: UUID,
+        participant_user_id: UUID,
+    ) -> TradeContractDetails:
+        """Fetch a trade contract for one of its participants."""
+        async with self._uow_factory() as uow:
+            return await uow.trade_contracts.get_for_participant(trade_id, participant_user_id)
+
+
+def get_trade_service() -> TradeService:
+    """Build the default trade service."""
+    return TradeService()

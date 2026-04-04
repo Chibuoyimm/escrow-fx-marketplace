@@ -17,6 +17,7 @@ from app.models.user import UserModel
 
 if TYPE_CHECKING:
     from app.models.exchange_request import ExchangeRequestModel
+    from app.models.trade_contract import TradeContractModel
 
 
 class ExchangeOfferModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -34,6 +35,10 @@ class ExchangeOfferModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     request: Mapped[ExchangeRequestModel] = relationship(back_populates="offers")
     offer_user: Mapped[UserModel] = relationship()
+    accepted_trade_contract: Mapped[TradeContractModel | None] = relationship(
+        back_populates="accepted_offer",
+        uselist=False,
+    )
 
     def to_domain(self) -> ExchangeOffer:
         """Convert the ORM row to a domain entity."""

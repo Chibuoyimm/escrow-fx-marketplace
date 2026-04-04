@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Numeric
@@ -15,6 +16,9 @@ from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.currency import CurrencyModel
 from app.models.exchange_offer import ExchangeOfferModel
 from app.models.user import UserModel
+
+if TYPE_CHECKING:
+    from app.models.trade_contract import TradeContractModel
 
 
 class ExchangeRequestModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -39,6 +43,10 @@ class ExchangeRequestModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     offers: Mapped[list[ExchangeOfferModel]] = relationship(
         back_populates="request",
         cascade="all, delete-orphan",
+    )
+    trade_contract: Mapped[TradeContractModel | None] = relationship(
+        back_populates="request",
+        uselist=False,
     )
 
     def to_domain(self) -> ExchangeRequest:

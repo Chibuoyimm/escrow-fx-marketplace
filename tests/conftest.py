@@ -19,6 +19,7 @@ from app.domain.entities import (
     Currency,
     ExchangeOffer,
     ExchangeRequest,
+    TradeContract,
     User,
 )
 from app.domain.enums import (
@@ -30,6 +31,7 @@ from app.domain.enums import (
     KycStatus,
     RailStatus,
     RiskLevel,
+    TradeContractStatus,
     UserRole,
     UserStatus,
 )
@@ -197,6 +199,36 @@ def build_exchange_offer(
         offered_rate=offered_rate,
         status=status,
         expires_at=expires_at or (created + timedelta(hours=1)),
+        created_at=created,
+        updated_at=updated_at or created,
+    )
+
+
+def build_trade_contract(
+    *,
+    request_id: UUID,
+    accepted_offer_id: UUID,
+    trade_id: UUID | None = None,
+    agreed_rate: Decimal = Decimal("1490.00"),
+    reference_rate_snapshot: Decimal | None = None,
+    from_amount: Decimal = Decimal("100.00"),
+    to_amount: Decimal = Decimal("149000.00"),
+    funding_deadline_at: datetime | None = None,
+    status: TradeContractStatus = TradeContractStatus.TERMS_LOCKED,
+    created_at: datetime | None = None,
+    updated_at: datetime | None = None,
+) -> TradeContract:
+    created = created_at or now()
+    return TradeContract(
+        id=trade_id or uuid4(),
+        request_id=request_id,
+        accepted_offer_id=accepted_offer_id,
+        agreed_rate=agreed_rate,
+        reference_rate_snapshot=reference_rate_snapshot,
+        from_amount=from_amount,
+        to_amount=to_amount,
+        funding_deadline_at=funding_deadline_at or (created + timedelta(minutes=30)),
+        status=status,
         created_at=created,
         updated_at=updated_at or created,
     )

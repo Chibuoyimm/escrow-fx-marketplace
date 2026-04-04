@@ -14,6 +14,7 @@ from app.domain.enums import (
     ExchangeOfferStatus,
     ExchangeRequestStatus,
     RailStatus,
+    TradeContractStatus,
 )
 from app.domain.exceptions import ConflictError, InvariantViolationError, NotFoundError
 from app.domain.value_objects import Money, Rate
@@ -21,12 +22,14 @@ from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 from app.models.corridor import CorridorModel, CorridorRailModel
 from app.models.exchange_offer import ExchangeOfferModel
 from app.models.exchange_request import ExchangeRequestModel
+from app.models.trade_contract import TradeContractModel
 from app.repositories.sqlalchemy import (
     SqlAlchemyCorridorRailRepository,
     SqlAlchemyCorridorRepository,
     SqlAlchemyCurrencyRepository,
     SqlAlchemyExchangeOfferRepository,
     SqlAlchemyExchangeRequestRepository,
+    SqlAlchemyTradeContractRepository,
     SqlAlchemyUserRepository,
 )
 from tests.conftest import (
@@ -35,6 +38,7 @@ from tests.conftest import (
     build_currency,
     build_exchange_offer,
     build_exchange_request,
+    build_trade_contract,
     build_user,
 )
 
@@ -315,6 +319,61 @@ async def test_exchange_offer_repository_round_trips_and_checks_active_offer(
 
 
 @pytest.mark.anyio
+async def test_trade_contract_repository_is_visible_only_to_participants(
+    session: AsyncSession,
+) -> None:
+    user_repository = SqlAlchemyUserRepository(session)
+    currency_repository = SqlAlchemyCurrencyRepository(session)
+    exchange_request_repository = SqlAlchemyExchangeRequestRepository(session)
+    exchange_offer_repository = SqlAlchemyExchangeOfferRepository(session)
+    trade_contract_repository = SqlAlchemyTradeContractRepository(session)
+
+    requester = await user_repository.add(build_user(email="requester@example.com"))
+    counterparty = await user_repository.add(build_user(email="counterparty@example.com"))
+    outsider = await user_repository.add(build_user(email="outsider@example.com"))
+    usd = await currency_repository.add(build_currency(code="USD"))
+    ngn = await currency_repository.add(build_currency(code="NGN"))
+    exchange_request = await exchange_request_repository.add(
+        build_exchange_request(
+            creator_user_id=requester.id,
+            from_currency_id=usd.id,
+            to_currency_id=ngn.id,
+            status=ExchangeRequestStatus.TERMS_LOCKED,
+        )
+    )
+    exchange_offer = await exchange_offer_repository.add(
+        build_exchange_offer(
+            request_id=exchange_request.id,
+            offer_user_id=counterparty.id,
+            status=ExchangeOfferStatus.ACCEPTED,
+        )
+    )
+    trade_contract = await trade_contract_repository.add(
+        build_trade_contract(
+            request_id=exchange_request.id,
+            accepted_offer_id=exchange_offer.id,
+            status=TradeContractStatus.TERMS_LOCKED,
+        )
+    )
+
+    requester_view = await trade_contract_repository.get_for_participant(
+        trade_contract.id,
+        requester.id,
+    )
+    counterparty_view = await trade_contract_repository.get_for_participant(
+        trade_contract.id,
+        counterparty.id,
+    )
+
+    assert requester_view.id == trade_contract.id
+    assert requester_view.requester_user_id == requester.id
+    assert counterparty_view.counterparty_user_id == counterparty.id
+
+    with pytest.raises(NotFoundError):
+        await trade_contract_repository.get_for_participant(trade_contract.id, outsider.id)
+
+
+@pytest.mark.anyio
 async def test_unit_of_work_rolls_back_when_an_error_occurs(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -432,6 +491,58 @@ async def test_deleting_exchange_request_cascades_to_exchange_offers(session: As
     )
 
     assert offer_rows.scalars().all() == []
+
+
+@pytest.mark.anyio
+async def test_deleting_trade_contract_references_is_non_destructive(session: AsyncSession) -> None:
+    user_repository = SqlAlchemyUserRepository(session)
+    currency_repository = SqlAlchemyCurrencyRepository(session)
+
+    requester = await user_repository.add(build_user(email="trade-requester@example.com"))
+    counterparty = await user_repository.add(build_user(email="trade-counterparty@example.com"))
+    usd = await currency_repository.add(build_currency(code="USD"))
+    ngn = await currency_repository.add(build_currency(code="NGN"))
+
+    exchange_request = ExchangeRequestModel(
+        creator_user_id=requester.id,
+        from_currency_id=usd.id,
+        to_currency_id=ngn.id,
+        from_amount=Decimal("100.00"),
+        preferred_rate=Decimal("1500.00"),
+        min_rate=Decimal("1450.00"),
+        status=ExchangeRequestStatus.TERMS_LOCKED,
+        expires_at=datetime.now(UTC),
+    )
+    exchange_offer = ExchangeOfferModel(
+        request=exchange_request,
+        offer_user_id=counterparty.id,
+        offered_rate=Decimal("1490.00"),
+        status=ExchangeOfferStatus.ACCEPTED,
+        expires_at=datetime.now(UTC),
+    )
+    trade_contract = TradeContractModel(
+        request=exchange_request,
+        accepted_offer=exchange_offer,
+        agreed_rate=Decimal("1490.00"),
+        reference_rate_snapshot=None,
+        from_amount=Decimal("100.00"),
+        to_amount=Decimal("149000.00"),
+        funding_deadline_at=datetime.now(UTC),
+        status=TradeContractStatus.TERMS_LOCKED,
+    )
+    session.add_all([exchange_request, exchange_offer, trade_contract])
+    await session.flush()
+
+    trade_id = trade_contract.id
+    request_id = exchange_request.id
+    offer_id = exchange_offer.id
+
+    await session.delete(trade_contract)
+    await session.flush()
+
+    assert await session.get(TradeContractModel, trade_id) is None
+    assert await session.get(ExchangeRequestModel, request_id) is not None
+    assert await session.get(ExchangeOfferModel, offer_id) is not None
 
 
 @pytest.mark.anyio

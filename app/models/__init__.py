@@ -5,6 +5,7 @@ from app.models.corridor import CorridorModel, CorridorRailModel
 from app.models.currency import CurrencyModel
 from app.models.exchange_offer import ExchangeOfferModel
 from app.models.exchange_request import ExchangeRequestModel
+from app.models.trade_contract import TradeContractModel
 from app.models.user import UserModel
 
 __all__ = [
@@ -14,5 +15,6 @@ __all__ = [
     "CurrencyModel",
     "ExchangeOfferModel",
     "ExchangeRequestModel",
+    "TradeContractModel",
     "UserModel",
 ]

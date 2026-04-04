@@ -68,6 +68,7 @@ class ExchangeRequestStatus(StrEnum):
 
     REQUEST_OPEN = "request_open"
     OFFER_PENDING = "offer_pending"
+    TERMS_LOCKED = "terms_locked"
     CANCELLED = "cancelled"
     EXPIRED = "expired"
 
@@ -80,3 +81,17 @@ class ExchangeOfferStatus(StrEnum):
     REJECTED = "rejected"
     EXPIRED = "expired"
     WITHDRAWN = "withdrawn"
+
+
+class TradeContractStatus(StrEnum):
+    """Lifecycle states for trade contracts."""
+
+    TERMS_LOCKED = "terms_locked"
+    AWAITING_DUAL_FUNDING = "awaiting_dual_funding"
+    ONE_LEG_FUNDED = "one_leg_funded"
+    DUAL_FUNDED = "dual_funded"
+    RELEASING = "releasing"
+    SETTLED = "settled"
+    EXPIRED_REFUNDING = "expired_refunding"
+    CANCELLED = "cancelled"
+    DISPUTED = "disputed"

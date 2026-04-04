@@ -21,6 +21,8 @@ from app.domain.entities import (
     ExchangeOfferDetails,
     ExchangeRequest,
     ExchangeRequestDetails,
+    TradeContract,
+    TradeContractDetails,
     User,
 )
 from app.domain.enums import (
@@ -36,6 +38,7 @@ from app.models.corridor import CorridorModel, CorridorRailModel
 from app.models.currency import CurrencyModel
 from app.models.exchange_offer import ExchangeOfferModel
 from app.models.exchange_request import ExchangeRequestModel
+from app.models.trade_contract import TradeContractModel
 from app.models.user import UserModel
 from app.repositories.protocols import (
     CorridorRailRepositoryProtocol,
@@ -43,6 +46,7 @@ from app.repositories.protocols import (
     CurrencyRepositoryProtocol,
     ExchangeOfferRepositoryProtocol,
     ExchangeRequestRepositoryProtocol,
+    TradeContractRepositoryProtocol,
     UserRepositoryProtocol,
 )
 
@@ -447,6 +451,33 @@ class SqlAlchemyExchangeOfferRepository(SqlAlchemyRepository, ExchangeOfferRepos
         await self._flush_or_raise_conflict("That exchange offer could not be saved.")
         return model.to_domain()
 
+    async def update(self, exchange_offer: ExchangeOffer) -> ExchangeOffer:
+        model = await self.session.get(ExchangeOfferModel, exchange_offer.id)
+        if model is None:
+            raise NotFoundError(f"Exchange offer '{exchange_offer.id}' was not found.")
+
+        model.status = exchange_offer.status
+        model.expires_at = exchange_offer.expires_at
+        model.updated_at = exchange_offer.updated_at
+
+        await self._flush_or_raise_conflict("That exchange offer could not be saved.")
+        return model.to_domain()
+
+    async def get(self, offer_id: UUID) -> ExchangeOffer:
+        model = await self.session.get(ExchangeOfferModel, offer_id)
+        if model is None:
+            raise NotFoundError(f"Exchange offer '{offer_id}' was not found.")
+        return model.to_domain()
+
+    async def list_for_request(self, request_id: UUID) -> list[ExchangeOffer]:
+        statement: Select[tuple[ExchangeOfferModel]] = (
+            select(ExchangeOfferModel)
+            .where(ExchangeOfferModel.request_id == request_id)
+            .order_by(ExchangeOfferModel.created_at.desc())
+        )
+        result = await self.session.execute(statement)
+        return [model.to_domain() for model in result.scalars().all()]
+
     async def list_details_for_request(self, request_id: UUID) -> list[ExchangeOfferDetails]:
         statement: Select[tuple[ExchangeOfferModel]] = (
             select(ExchangeOfferModel)
@@ -465,3 +496,53 @@ class SqlAlchemyExchangeOfferRepository(SqlAlchemyRepository, ExchangeOfferRepos
         )
         result = await self.session.execute(statement)
         return result.scalar_one_or_none() is not None
+
+
+class SqlAlchemyTradeContractRepository(SqlAlchemyRepository, TradeContractRepositoryProtocol):
+    """Trade contract repository implementation."""
+
+    @staticmethod
+    def _details_load_options() -> tuple[Any, ...]:
+        return (
+            joinedload(TradeContractModel.request).joinedload(ExchangeRequestModel.from_currency),
+            joinedload(TradeContractModel.request).joinedload(ExchangeRequestModel.to_currency),
+            joinedload(TradeContractModel.accepted_offer),
+        )
+
+    async def add(self, trade_contract: TradeContract) -> TradeContract:
+        model = TradeContractModel(
+            id=trade_contract.id,
+            request_id=trade_contract.request_id,
+            accepted_offer_id=trade_contract.accepted_offer_id,
+            agreed_rate=trade_contract.agreed_rate,
+            reference_rate_snapshot=trade_contract.reference_rate_snapshot,
+            from_amount=trade_contract.from_amount,
+            to_amount=trade_contract.to_amount,
+            funding_deadline_at=trade_contract.funding_deadline_at,
+            status=trade_contract.status,
+            created_at=trade_contract.created_at,
+            updated_at=trade_contract.updated_at,
+        )
+        self.session.add(model)
+        await self._flush_or_raise_conflict("That trade contract could not be saved.")
+        return model.to_domain()
+
+    async def get_for_participant(self, trade_id: UUID, user_id: UUID) -> TradeContractDetails:
+        statement: Select[tuple[TradeContractModel]] = (
+            select(TradeContractModel)
+            .options(*self._details_load_options())
+            .where(
+                TradeContractModel.id == trade_id,
+                or_(
+                    TradeContractModel.request.has(ExchangeRequestModel.creator_user_id == user_id),
+                    TradeContractModel.accepted_offer.has(
+                        ExchangeOfferModel.offer_user_id == user_id
+                    ),
+                ),
+            )
+        )
+        result = await self.session.execute(statement)
+        model = result.unique().scalar_one_or_none()
+        if model is None:
+            raise NotFoundError(f"Trade '{trade_id}' was not found.")
+        return model.to_details()
