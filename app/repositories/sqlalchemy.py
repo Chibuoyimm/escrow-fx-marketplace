@@ -11,17 +11,27 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload, with_loader_criteria
 
-from app.domain.entities import Corridor, CorridorDetails, CorridorRail, Currency, User
+from app.domain.entities import (
+    Corridor,
+    CorridorDetails,
+    CorridorRail,
+    Currency,
+    ExchangeRequest,
+    ExchangeRequestDetails,
+    User,
+)
 from app.domain.enums import CorridorStatus, CurrencyStatus, RailStatus
 from app.domain.exceptions import ConflictError, NotFoundError
 from app.infrastructure.exceptions import InfrastructureError
 from app.models.corridor import CorridorModel, CorridorRailModel
 from app.models.currency import CurrencyModel
+from app.models.exchange_request import ExchangeRequestModel
 from app.models.user import UserModel
 from app.repositories.protocols import (
     CorridorRailRepositoryProtocol,
     CorridorRepositoryProtocol,
     CurrencyRepositoryProtocol,
+    ExchangeRequestRepositoryProtocol,
     UserRepositoryProtocol,
 )
 
@@ -280,3 +290,83 @@ class SqlAlchemyCorridorRailRepository(SqlAlchemyRepository, CorridorRailReposit
         )
         result = await self.session.execute(statement)
         return [model.to_domain() for model in result.scalars().all()]
+
+
+class SqlAlchemyExchangeRequestRepository(SqlAlchemyRepository, ExchangeRequestRepositoryProtocol):
+    """Exchange request repository implementation."""
+
+    @staticmethod
+    def _details_load_options() -> tuple[Any, ...]:
+        return (
+            joinedload(ExchangeRequestModel.from_currency),
+            joinedload(ExchangeRequestModel.to_currency),
+        )
+
+    async def add(self, exchange_request: ExchangeRequest) -> ExchangeRequest:
+        model = ExchangeRequestModel(
+            id=exchange_request.id,
+            creator_user_id=exchange_request.creator_user_id,
+            from_currency_id=exchange_request.from_currency_id,
+            to_currency_id=exchange_request.to_currency_id,
+            from_amount=exchange_request.from_amount,
+            preferred_rate=exchange_request.preferred_rate,
+            min_rate=exchange_request.min_rate,
+            status=exchange_request.status,
+            expires_at=exchange_request.expires_at,
+            created_at=exchange_request.created_at,
+            updated_at=exchange_request.updated_at,
+        )
+        self.session.add(model)
+        await self._flush_or_raise_conflict("That exchange request could not be saved.")
+        return model.to_domain()
+
+    async def get(self, request_id: UUID) -> ExchangeRequest:
+        model = await self.session.get(ExchangeRequestModel, request_id)
+        if model is None:
+            raise NotFoundError(f"Exchange request '{request_id}' was not found.")
+        return model.to_domain()
+
+    async def get_for_user(self, request_id: UUID, user_id: UUID) -> ExchangeRequest:
+        statement: Select[tuple[ExchangeRequestModel]] = select(ExchangeRequestModel).where(
+            ExchangeRequestModel.id == request_id,
+            ExchangeRequestModel.creator_user_id == user_id,
+        )
+        result = await self.session.execute(statement)
+        model = result.scalar_one_or_none()
+        if model is None:
+            raise NotFoundError(f"Exchange request '{request_id}' was not found.")
+        return model.to_domain()
+
+    async def list_for_user(self, user_id: UUID) -> list[ExchangeRequest]:
+        statement: Select[tuple[ExchangeRequestModel]] = (
+            select(ExchangeRequestModel)
+            .where(ExchangeRequestModel.creator_user_id == user_id)
+            .order_by(ExchangeRequestModel.created_at.desc())
+        )
+        result = await self.session.execute(statement)
+        return [model.to_domain() for model in result.scalars().all()]
+
+    async def get_details_for_user(self, request_id: UUID, user_id: UUID) -> ExchangeRequestDetails:
+        statement: Select[tuple[ExchangeRequestModel]] = (
+            select(ExchangeRequestModel)
+            .options(*self._details_load_options())
+            .where(
+                ExchangeRequestModel.id == request_id,
+                ExchangeRequestModel.creator_user_id == user_id,
+            )
+        )
+        result = await self.session.execute(statement)
+        model = result.unique().scalar_one_or_none()
+        if model is None:
+            raise NotFoundError(f"Exchange request '{request_id}' was not found.")
+        return model.to_details()
+
+    async def list_details_for_user(self, user_id: UUID) -> list[ExchangeRequestDetails]:
+        statement: Select[tuple[ExchangeRequestModel]] = (
+            select(ExchangeRequestModel)
+            .options(*self._details_load_options())
+            .where(ExchangeRequestModel.creator_user_id == user_id)
+            .order_by(ExchangeRequestModel.created_at.desc())
+        )
+        result = await self.session.execute(statement)
+        return [model.to_details() for model in result.unique().scalars().all()]

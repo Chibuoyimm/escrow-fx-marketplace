@@ -13,10 +13,11 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from app.domain.entities import Corridor, CorridorRail, Currency, User
+from app.domain.entities import Corridor, CorridorRail, Currency, ExchangeRequest, User
 from app.domain.enums import (
     CorridorStatus,
     CurrencyStatus,
+    ExchangeRequestStatus,
     FlowType,
     KycStatus,
     RailStatus,
@@ -59,16 +60,23 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
-def build_user(*, email: str = "user@example.com", user_id: UUID | None = None) -> User:
+def build_user(
+    *,
+    email: str = "user@example.com",
+    user_id: UUID | None = None,
+    password_hash: str = "hashed-password",
+    status: UserStatus = UserStatus.ACTIVE,
+    kyc_status: KycStatus = KycStatus.VERIFIED,
+) -> User:
     return User(
         id=user_id or uuid4(),
         email=email,
-        password_hash="hashed-password",
+        password_hash=password_hash,
         phone="+2348000000000",
         country="NG",
         role=UserRole.CUSTOMER,
-        status=UserStatus.ACTIVE,
-        kyc_status=KycStatus.VERIFIED,
+        status=status,
+        kyc_status=kyc_status,
         risk_level=RiskLevel.LOW,
         created_at=now(),
         updated_at=now(),
@@ -129,4 +137,34 @@ def build_corridor_rail(
         status=status,
         created_at=now(),
         updated_at=now(),
+    )
+
+
+def build_exchange_request(
+    *,
+    creator_user_id: UUID,
+    from_currency_id: UUID,
+    to_currency_id: UUID,
+    request_id: UUID | None = None,
+    from_amount: Decimal = Decimal("100.00"),
+    preferred_rate: Decimal = Decimal("1500.00"),
+    min_rate: Decimal | None = Decimal("1450.00"),
+    status: ExchangeRequestStatus = ExchangeRequestStatus.REQUEST_OPEN,
+    expires_at: datetime | None = None,
+    created_at: datetime | None = None,
+    updated_at: datetime | None = None,
+) -> ExchangeRequest:
+    created = created_at or now()
+    return ExchangeRequest(
+        id=request_id or uuid4(),
+        creator_user_id=creator_user_id,
+        from_currency_id=from_currency_id,
+        to_currency_id=to_currency_id,
+        from_amount=from_amount,
+        preferred_rate=preferred_rate,
+        min_rate=min_rate,
+        status=status,
+        expires_at=expires_at or now(),
+        created_at=created,
+        updated_at=updated_at or created,
     )

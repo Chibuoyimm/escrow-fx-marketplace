@@ -7,18 +7,26 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.domain.enums import CorridorStatus, CurrencyStatus, RailStatus
+from app.domain.enums import CorridorStatus, CurrencyStatus, ExchangeRequestStatus, RailStatus
 from app.domain.exceptions import ConflictError, InvariantViolationError, NotFoundError
 from app.domain.value_objects import Money, Rate
 from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 from app.models.corridor import CorridorModel, CorridorRailModel
+from app.models.exchange_request import ExchangeRequestModel
 from app.repositories.sqlalchemy import (
     SqlAlchemyCorridorRailRepository,
     SqlAlchemyCorridorRepository,
     SqlAlchemyCurrencyRepository,
+    SqlAlchemyExchangeRequestRepository,
     SqlAlchemyUserRepository,
 )
-from tests.conftest import build_corridor, build_corridor_rail, build_currency, build_user
+from tests.conftest import (
+    build_corridor,
+    build_corridor_rail,
+    build_currency,
+    build_exchange_request,
+    build_user,
+)
 
 
 @pytest.mark.anyio
@@ -149,6 +157,7 @@ async def test_repository_getters_raise_not_found_for_missing_records(
     user_repository = SqlAlchemyUserRepository(session)
     currency_repository = SqlAlchemyCurrencyRepository(session)
     corridor_repository = SqlAlchemyCorridorRepository(session)
+    exchange_request_repository = SqlAlchemyExchangeRequestRepository(session)
 
     with pytest.raises(NotFoundError):
         await user_repository.get(uuid4())
@@ -161,6 +170,59 @@ async def test_repository_getters_raise_not_found_for_missing_records(
 
     with pytest.raises(NotFoundError):
         await corridor_repository.get(uuid4())
+
+    with pytest.raises(NotFoundError):
+        await exchange_request_repository.get(uuid4())
+
+
+@pytest.mark.anyio
+async def test_exchange_request_repository_round_trips_and_scopes_by_creator(
+    session: AsyncSession,
+) -> None:
+    user_repository = SqlAlchemyUserRepository(session)
+    currency_repository = SqlAlchemyCurrencyRepository(session)
+    exchange_request_repository = SqlAlchemyExchangeRequestRepository(session)
+
+    creator = await user_repository.add(build_user(email="creator@example.com"))
+    other_user = await user_repository.add(build_user(email="other@example.com"))
+    usd = await currency_repository.add(build_currency(code="USD"))
+    ngn = await currency_repository.add(build_currency(code="NGN"))
+
+    older_request = await exchange_request_repository.add(
+        build_exchange_request(
+            creator_user_id=creator.id,
+            from_currency_id=usd.id,
+            to_currency_id=ngn.id,
+            status=ExchangeRequestStatus.REQUEST_OPEN,
+        )
+    )
+    newer_request = await exchange_request_repository.add(
+        build_exchange_request(
+            creator_user_id=creator.id,
+            from_currency_id=ngn.id,
+            to_currency_id=usd.id,
+            status=ExchangeRequestStatus.REQUEST_OPEN,
+        )
+    )
+
+    fetched = await exchange_request_repository.get(older_request.id)
+    owned = await exchange_request_repository.get_for_user(older_request.id, creator.id)
+    details = await exchange_request_repository.get_details_for_user(older_request.id, creator.id)
+    requests = await exchange_request_repository.list_for_user(creator.id)
+    detailed_requests = await exchange_request_repository.list_details_for_user(creator.id)
+
+    assert fetched.id == older_request.id
+    assert owned.id == older_request.id
+    assert details.from_currency_code == "USD"
+    assert details.to_currency_code == "NGN"
+    assert [request.id for request in requests] == [newer_request.id, older_request.id]
+    assert [request.id for request in detailed_requests] == [newer_request.id, older_request.id]
+
+    with pytest.raises(NotFoundError):
+        await exchange_request_repository.get_for_user(older_request.id, other_user.id)
+
+    with pytest.raises(NotFoundError):
+        await exchange_request_repository.get_details_for_user(older_request.id, other_user.id)
 
 
 @pytest.mark.anyio
@@ -213,6 +275,32 @@ async def test_deleting_a_corridor_deletes_its_rails_via_orm_cascade(session: As
     )
 
     assert rail_rows.scalars().all() == []
+
+
+@pytest.mark.anyio
+async def test_deleting_supporting_currency_restricts_exchange_request_relationships(
+    session: AsyncSession,
+) -> None:
+    user_repository = SqlAlchemyUserRepository(session)
+    currency_repository = SqlAlchemyCurrencyRepository(session)
+    exchange_request_repository = SqlAlchemyExchangeRequestRepository(session)
+
+    creator = await user_repository.add(build_user(email="exchange-user@example.com"))
+    usd = await currency_repository.add(build_currency(code="USD"))
+    ngn = await currency_repository.add(build_currency(code="NGN"))
+    request = await exchange_request_repository.add(
+        build_exchange_request(
+            creator_user_id=creator.id,
+            from_currency_id=usd.id,
+            to_currency_id=ngn.id,
+        )
+    )
+
+    detail = await exchange_request_repository.get_details_for_user(request.id, creator.id)
+    row = await session.get(ExchangeRequestModel, request.id)
+
+    assert detail.from_currency_code == "USD"
+    assert row is not None
 
 
 @pytest.mark.anyio

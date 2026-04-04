@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     jwt_secret_key: str = "change-me-please-use-a-32-char-secret"
     jwt_algorithm: str = "HS256"
     access_token_expiry_minutes: int = 60
+    exchange_request_expiry_minutes: int = 1440
     jwt_issuer: str = "escrow-fx-marketplace"
 
     model_config = SettingsConfigDict(

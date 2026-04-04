@@ -61,3 +61,11 @@ class FlowType(StrEnum):
 
     FUNDING = "funding"
     PAYOUT = "payout"
+
+
+class ExchangeRequestStatus(StrEnum):
+    """Lifecycle states for exchange requests."""
+
+    REQUEST_OPEN = "request_open"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"

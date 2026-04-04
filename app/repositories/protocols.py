@@ -5,7 +5,15 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from uuid import UUID
 
-from app.domain.entities import Corridor, CorridorDetails, CorridorRail, Currency, User
+from app.domain.entities import (
+    Corridor,
+    CorridorDetails,
+    CorridorRail,
+    Currency,
+    ExchangeRequest,
+    ExchangeRequestDetails,
+    User,
+)
 
 
 class UserRepositoryProtocol(ABC):
@@ -90,3 +98,31 @@ class CorridorRailRepositoryProtocol(ABC):
     @abstractmethod
     async def list_for_corridor(self, corridor_id: UUID) -> list[CorridorRail]:
         """List corridor rails by corridor."""
+
+
+class ExchangeRequestRepositoryProtocol(ABC):
+    """Exchange request repository contract."""
+
+    @abstractmethod
+    async def add(self, exchange_request: ExchangeRequest) -> ExchangeRequest:
+        """Persist an exchange request."""
+
+    @abstractmethod
+    async def get(self, request_id: UUID) -> ExchangeRequest:
+        """Fetch an exchange request by identifier."""
+
+    @abstractmethod
+    async def get_for_user(self, request_id: UUID, user_id: UUID) -> ExchangeRequest:
+        """Fetch a user's exchange request by identifier."""
+
+    @abstractmethod
+    async def list_for_user(self, user_id: UUID) -> list[ExchangeRequest]:
+        """List exchange requests for a user."""
+
+    @abstractmethod
+    async def get_details_for_user(self, request_id: UUID, user_id: UUID) -> ExchangeRequestDetails:
+        """Fetch a user's exchange request read model by identifier."""
+
+    @abstractmethod
+    async def list_details_for_user(self, user_id: UUID) -> list[ExchangeRequestDetails]:
+        """List exchange request read models for a user."""

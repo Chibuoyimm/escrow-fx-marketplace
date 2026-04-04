@@ -10,6 +10,7 @@ from uuid import UUID
 from app.domain.enums import (
     CorridorStatus,
     CurrencyStatus,
+    ExchangeRequestStatus,
     FlowType,
     KycStatus,
     RailStatus,
@@ -101,3 +102,37 @@ class CorridorDetails:
     funding_sla_minutes: int
     fee_model_name: str | None
     rails: tuple[CorridorRailDetails, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ExchangeRequest:
+    """A user-created exchange request."""
+
+    id: UUID
+    creator_user_id: UUID
+    from_currency_id: UUID
+    to_currency_id: UUID
+    from_amount: Decimal
+    preferred_rate: Decimal
+    min_rate: Decimal | None
+    status: ExchangeRequestStatus
+    expires_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ExchangeRequestDetails:
+    """A customer-facing exchange request projection."""
+
+    id: UUID
+    creator_user_id: UUID
+    from_currency_code: str
+    to_currency_code: str
+    from_amount: Decimal
+    preferred_rate: Decimal
+    min_rate: Decimal | None
+    status: ExchangeRequestStatus
+    expires_at: datetime
+    created_at: datetime
+    updated_at: datetime
