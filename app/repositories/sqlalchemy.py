@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, and_, select
+from sqlalchemy import Select, and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload, with_loader_criteria
@@ -16,21 +17,31 @@ from app.domain.entities import (
     CorridorDetails,
     CorridorRail,
     Currency,
+    ExchangeOffer,
+    ExchangeOfferDetails,
     ExchangeRequest,
     ExchangeRequestDetails,
     User,
 )
-from app.domain.enums import CorridorStatus, CurrencyStatus, RailStatus
+from app.domain.enums import (
+    CorridorStatus,
+    CurrencyStatus,
+    ExchangeOfferStatus,
+    ExchangeRequestStatus,
+    RailStatus,
+)
 from app.domain.exceptions import ConflictError, NotFoundError
 from app.infrastructure.exceptions import InfrastructureError
 from app.models.corridor import CorridorModel, CorridorRailModel
 from app.models.currency import CurrencyModel
+from app.models.exchange_offer import ExchangeOfferModel
 from app.models.exchange_request import ExchangeRequestModel
 from app.models.user import UserModel
 from app.repositories.protocols import (
     CorridorRailRepositoryProtocol,
     CorridorRepositoryProtocol,
     CurrencyRepositoryProtocol,
+    ExchangeOfferRepositoryProtocol,
     ExchangeRequestRepositoryProtocol,
     UserRepositoryProtocol,
 )
@@ -254,13 +265,6 @@ class SqlAlchemyCorridorRepository(SqlAlchemyRepository, CorridorRepositoryProto
             )
         return model.to_details()
 
-    async def list_active(self) -> list[Corridor]:
-        statement: Select[tuple[CorridorModel]] = select(CorridorModel).where(
-            CorridorModel.status == CorridorStatus.ACTIVE
-        )
-        result = await self.session.execute(statement)
-        return [model.to_domain() for model in result.scalars().all()]
-
 
 class SqlAlchemyCorridorRailRepository(SqlAlchemyRepository, CorridorRailRepositoryProtocol):
     """Corridor rail repository implementation."""
@@ -302,6 +306,17 @@ class SqlAlchemyExchangeRequestRepository(SqlAlchemyRepository, ExchangeRequestR
             joinedload(ExchangeRequestModel.to_currency),
         )
 
+    @staticmethod
+    def _board_visible_statuses() -> tuple[ExchangeRequestStatus, ...]:
+        return (
+            ExchangeRequestStatus.REQUEST_OPEN,
+            ExchangeRequestStatus.OFFER_PENDING,
+        )
+
+    @staticmethod
+    def _utc_now() -> datetime:
+        return datetime.now(UTC)
+
     async def add(self, exchange_request: ExchangeRequest) -> ExchangeRequest:
         model = ExchangeRequestModel(
             id=exchange_request.id,
@@ -320,31 +335,23 @@ class SqlAlchemyExchangeRequestRepository(SqlAlchemyRepository, ExchangeRequestR
         await self._flush_or_raise_conflict("That exchange request could not be saved.")
         return model.to_domain()
 
+    async def update(self, exchange_request: ExchangeRequest) -> ExchangeRequest:
+        model = await self.session.get(ExchangeRequestModel, exchange_request.id)
+        if model is None:
+            raise NotFoundError(f"Exchange request '{exchange_request.id}' was not found.")
+
+        model.status = exchange_request.status
+        model.expires_at = exchange_request.expires_at
+        model.updated_at = exchange_request.updated_at
+
+        await self._flush_or_raise_conflict("That exchange request could not be saved.")
+        return model.to_domain()
+
     async def get(self, request_id: UUID) -> ExchangeRequest:
         model = await self.session.get(ExchangeRequestModel, request_id)
         if model is None:
             raise NotFoundError(f"Exchange request '{request_id}' was not found.")
         return model.to_domain()
-
-    async def get_for_user(self, request_id: UUID, user_id: UUID) -> ExchangeRequest:
-        statement: Select[tuple[ExchangeRequestModel]] = select(ExchangeRequestModel).where(
-            ExchangeRequestModel.id == request_id,
-            ExchangeRequestModel.creator_user_id == user_id,
-        )
-        result = await self.session.execute(statement)
-        model = result.scalar_one_or_none()
-        if model is None:
-            raise NotFoundError(f"Exchange request '{request_id}' was not found.")
-        return model.to_domain()
-
-    async def list_for_user(self, user_id: UUID) -> list[ExchangeRequest]:
-        statement: Select[tuple[ExchangeRequestModel]] = (
-            select(ExchangeRequestModel)
-            .where(ExchangeRequestModel.creator_user_id == user_id)
-            .order_by(ExchangeRequestModel.created_at.desc())
-        )
-        result = await self.session.execute(statement)
-        return [model.to_domain() for model in result.scalars().all()]
 
     async def get_details_for_user(self, request_id: UUID, user_id: UUID) -> ExchangeRequestDetails:
         statement: Select[tuple[ExchangeRequestModel]] = (
@@ -370,3 +377,91 @@ class SqlAlchemyExchangeRequestRepository(SqlAlchemyRepository, ExchangeRequestR
         )
         result = await self.session.execute(statement)
         return [model.to_details() for model in result.unique().scalars().all()]
+
+    async def list_board_details(self, viewer_user_id: UUID) -> list[ExchangeRequestDetails]:
+        statement: Select[tuple[ExchangeRequestModel]] = (
+            select(ExchangeRequestModel)
+            .options(*self._details_load_options())
+            .where(
+                ExchangeRequestModel.creator_user_id != viewer_user_id,
+                ExchangeRequestModel.status.in_(self._board_visible_statuses()),
+                ExchangeRequestModel.expires_at > self._utc_now(),
+                ExchangeRequestModel.from_currency.has(
+                    CurrencyModel.status == CurrencyStatus.ACTIVE
+                ),
+                ExchangeRequestModel.to_currency.has(CurrencyModel.status == CurrencyStatus.ACTIVE),
+            )
+            .order_by(ExchangeRequestModel.created_at.desc())
+        )
+        result = await self.session.execute(statement)
+        return [model.to_details() for model in result.unique().scalars().all()]
+
+    async def get_visible_details(
+        self,
+        request_id: UUID,
+        viewer_user_id: UUID,
+    ) -> ExchangeRequestDetails:
+        statement: Select[tuple[ExchangeRequestModel]] = (
+            select(ExchangeRequestModel)
+            .options(*self._details_load_options())
+            .where(
+                ExchangeRequestModel.id == request_id,
+                or_(
+                    ExchangeRequestModel.creator_user_id == viewer_user_id,
+                    and_(
+                        ExchangeRequestModel.creator_user_id != viewer_user_id,
+                        ExchangeRequestModel.status.in_(self._board_visible_statuses()),
+                        ExchangeRequestModel.expires_at > self._utc_now(),
+                        ExchangeRequestModel.from_currency.has(
+                            CurrencyModel.status == CurrencyStatus.ACTIVE
+                        ),
+                        ExchangeRequestModel.to_currency.has(
+                            CurrencyModel.status == CurrencyStatus.ACTIVE
+                        ),
+                    ),
+                ),
+            )
+        )
+        result = await self.session.execute(statement)
+        model = result.unique().scalar_one_or_none()
+        if model is None:
+            raise NotFoundError(f"Exchange request '{request_id}' was not found.")
+        return model.to_details()
+
+
+class SqlAlchemyExchangeOfferRepository(SqlAlchemyRepository, ExchangeOfferRepositoryProtocol):
+    """Exchange offer repository implementation."""
+
+    async def add(self, exchange_offer: ExchangeOffer) -> ExchangeOffer:
+        model = ExchangeOfferModel(
+            id=exchange_offer.id,
+            request_id=exchange_offer.request_id,
+            offer_user_id=exchange_offer.offer_user_id,
+            offered_rate=exchange_offer.offered_rate,
+            status=exchange_offer.status,
+            expires_at=exchange_offer.expires_at,
+            created_at=exchange_offer.created_at,
+            updated_at=exchange_offer.updated_at,
+        )
+        self.session.add(model)
+        await self._flush_or_raise_conflict("That exchange offer could not be saved.")
+        return model.to_domain()
+
+    async def list_details_for_request(self, request_id: UUID) -> list[ExchangeOfferDetails]:
+        statement: Select[tuple[ExchangeOfferModel]] = (
+            select(ExchangeOfferModel)
+            .where(ExchangeOfferModel.request_id == request_id)
+            .order_by(ExchangeOfferModel.created_at.desc())
+        )
+        result = await self.session.execute(statement)
+        return [model.to_details() for model in result.scalars().all()]
+
+    async def has_active_offer_for_request(self, request_id: UUID, user_id: UUID) -> bool:
+        statement: Select[tuple[ExchangeOfferModel]] = select(ExchangeOfferModel).where(
+            ExchangeOfferModel.request_id == request_id,
+            ExchangeOfferModel.offer_user_id == user_id,
+            ExchangeOfferModel.status == ExchangeOfferStatus.ACTIVE,
+            ExchangeOfferModel.expires_at > SqlAlchemyExchangeRequestRepository._utc_now(),
+        )
+        result = await self.session.execute(statement)
+        return result.scalar_one_or_none() is not None

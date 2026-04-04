@@ -10,6 +10,7 @@ from uuid import UUID
 from app.domain.enums import (
     CorridorStatus,
     CurrencyStatus,
+    ExchangeOfferStatus,
     ExchangeRequestStatus,
     FlowType,
     KycStatus,
@@ -133,6 +134,34 @@ class ExchangeRequestDetails:
     preferred_rate: Decimal
     min_rate: Decimal | None
     status: ExchangeRequestStatus
+    expires_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ExchangeOffer:
+    """A counterparty offer made against an exchange request."""
+
+    id: UUID
+    request_id: UUID
+    offer_user_id: UUID
+    offered_rate: Decimal
+    status: ExchangeOfferStatus
+    expires_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ExchangeOfferDetails:
+    """A customer-facing exchange offer projection."""
+
+    id: UUID
+    request_id: UUID
+    offer_user_id: UUID
+    offered_rate: Decimal
+    status: ExchangeOfferStatus
     expires_at: datetime
     created_at: datetime
     updated_at: datetime

@@ -9,12 +9,19 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.domain.enums import CorridorStatus, CurrencyStatus, KycStatus, UserStatus
+from app.domain.enums import (
+    CorridorStatus,
+    CurrencyStatus,
+    ExchangeRequestStatus,
+    KycStatus,
+    UserStatus,
+)
 from app.infrastructure.config import settings
 from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.security import SecurityService
 from app.main import app
 from app.services.auth import AuthService, get_auth_service
+from app.services.exchange_offer import ExchangeOfferService, get_exchange_offer_service
 from app.services.exchange_request import ExchangeRequestService, get_exchange_request_service
 from tests.conftest import (
     build_corridor,
@@ -44,12 +51,21 @@ def exchange_request_service(
 
 
 @pytest.fixture
+def exchange_offer_service(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> ExchangeOfferService:
+    return ExchangeOfferService(uow_factory=lambda: SqlAlchemyUnitOfWork(session_factory))
+
+
+@pytest.fixture
 async def client(
     auth_service: AuthService,
     exchange_request_service: ExchangeRequestService,
+    exchange_offer_service: ExchangeOfferService,
 ) -> AsyncIterator[AsyncClient]:
     app.dependency_overrides[get_auth_service] = lambda: auth_service
     app.dependency_overrides[get_exchange_request_service] = lambda: exchange_request_service
+    app.dependency_overrides[get_exchange_offer_service] = lambda: exchange_offer_service
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://testserver",
@@ -406,7 +422,64 @@ async def test_create_exchange_request_rejects_invalid_rate_combinations(
     assert response.json()["error_code"] == "invariant_violation"
 
 
-async def test_list_exchange_requests_returns_only_authenticated_users_requests(
+async def test_list_exchange_requests_returns_board_visible_requests(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    currencies = await seed_currencies_and_corridor(session_factory)
+    viewer_id, headers = await create_user_and_token(
+        session_factory, auth_service, email="viewer@example.com"
+    )
+    creator_id, _ = await create_user_and_token(
+        session_factory, auth_service, email="creator@example.com"
+    )
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        visible_request = await uow.exchange_requests.add(
+            build_exchange_request(
+                creator_user_id=creator_id,
+                from_currency_id=currencies["from_currency_id"],
+                to_currency_id=currencies["to_currency_id"],
+                status=ExchangeRequestStatus.REQUEST_OPEN,
+            )
+        )
+        await uow.exchange_requests.add(
+            build_exchange_request(
+                creator_user_id=viewer_id,
+                from_currency_id=currencies["to_currency_id"],
+                to_currency_id=currencies["from_currency_id"],
+                status=ExchangeRequestStatus.REQUEST_OPEN,
+            )
+        )
+        await uow.exchange_requests.add(
+            build_exchange_request(
+                creator_user_id=creator_id,
+                from_currency_id=currencies["from_currency_id"],
+                to_currency_id=currencies["to_currency_id"],
+                status=ExchangeRequestStatus.CANCELLED,
+            )
+        )
+        await uow.exchange_requests.add(
+            build_exchange_request(
+                creator_user_id=creator_id,
+                from_currency_id=currencies["from_currency_id"],
+                to_currency_id=currencies["to_currency_id"],
+                status=ExchangeRequestStatus.REQUEST_OPEN,
+                expires_at=datetime.now(UTC) - timedelta(minutes=1),
+            )
+        )
+        await uow.commit()
+
+    response = await client.get("/api/v1/exchange-requests", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [request["id"] for request in body] == [str(visible_request.id)]
+    assert all(request["creator_user_id"] != str(viewer_id) for request in body)
+
+
+async def test_list_my_exchange_requests_returns_only_authenticated_users_requests(
     client: AsyncClient,
     auth_service: AuthService,
     session_factory: async_sessionmaker[AsyncSession],
@@ -420,14 +493,12 @@ async def test_list_exchange_requests_returns_only_authenticated_users_requests(
     )
 
     async with SqlAlchemyUnitOfWork(session_factory) as uow:
-        older_created_at = datetime.now(UTC) - timedelta(minutes=10)
-        newer_created_at = datetime.now(UTC)
-        await uow.exchange_requests.add(
+        older_request = await uow.exchange_requests.add(
             build_exchange_request(
                 creator_user_id=user_id,
                 from_currency_id=currencies["from_currency_id"],
                 to_currency_id=currencies["to_currency_id"],
-                created_at=older_created_at,
+                created_at=datetime.now(UTC) - timedelta(minutes=10),
             )
         )
         newer_request = await uow.exchange_requests.add(
@@ -435,7 +506,7 @@ async def test_list_exchange_requests_returns_only_authenticated_users_requests(
                 creator_user_id=user_id,
                 from_currency_id=currencies["to_currency_id"],
                 to_currency_id=currencies["from_currency_id"],
-                created_at=newer_created_at,
+                created_at=datetime.now(UTC),
             )
         )
         await uow.exchange_requests.add(
@@ -447,16 +518,15 @@ async def test_list_exchange_requests_returns_only_authenticated_users_requests(
         )
         await uow.commit()
 
-    response = await client.get("/api/v1/exchange-requests", headers=headers)
+    response = await client.get("/api/v1/exchange-requests/mine", headers=headers)
 
     assert response.status_code == 200
     body = response.json()
-    assert len(body) == 2
+    assert [request["id"] for request in body] == [str(newer_request.id), str(older_request.id)]
     assert all(request["creator_user_id"] == str(user_id) for request in body)
-    assert body[0]["id"] == str(newer_request.id)
 
 
-async def test_get_exchange_request_by_id_returns_only_users_own_request(
+async def test_get_exchange_request_by_id_returns_own_or_board_visible_request(
     client: AsyncClient,
     auth_service: AuthService,
     session_factory: async_sessionmaker[AsyncSession],
@@ -465,7 +535,7 @@ async def test_get_exchange_request_by_id_returns_only_users_own_request(
     user_id, headers = await create_user_and_token(
         session_factory, auth_service, email="get-owner@example.com"
     )
-    other_user_id, other_headers = await create_user_and_token(
+    other_user_id, _ = await create_user_and_token(
         session_factory,
         auth_service,
         email="hidden-owner@example.com",
@@ -479,27 +549,37 @@ async def test_get_exchange_request_by_id_returns_only_users_own_request(
                 to_currency_id=currencies["to_currency_id"],
             )
         )
-        other_request = await uow.exchange_requests.add(
+        visible_request = await uow.exchange_requests.add(
             build_exchange_request(
                 creator_user_id=other_user_id,
                 from_currency_id=currencies["from_currency_id"],
                 to_currency_id=currencies["to_currency_id"],
+                status=ExchangeRequestStatus.OFFER_PENDING,
+            )
+        )
+        hidden_request = await uow.exchange_requests.add(
+            build_exchange_request(
+                creator_user_id=other_user_id,
+                from_currency_id=currencies["from_currency_id"],
+                to_currency_id=currencies["to_currency_id"],
+                status=ExchangeRequestStatus.CANCELLED,
             )
         )
         await uow.commit()
 
     own_response = await client.get(f"/api/v1/exchange-requests/{own_request.id}", headers=headers)
-    hidden_response = await client.get(
-        f"/api/v1/exchange-requests/{other_request.id}",
+    visible_response = await client.get(
+        f"/api/v1/exchange-requests/{visible_request.id}",
         headers=headers,
     )
-    other_visible_response = await client.get(
-        f"/api/v1/exchange-requests/{other_request.id}",
-        headers=other_headers,
+    hidden_response = await client.get(
+        f"/api/v1/exchange-requests/{hidden_request.id}",
+        headers=headers,
     )
 
     assert own_response.status_code == 200
     assert own_response.json()["id"] == str(own_request.id)
+    assert visible_response.status_code == 200
+    assert visible_response.json()["id"] == str(visible_request.id)
     assert hidden_response.status_code == 404
     assert hidden_response.json()["error_code"] == "not_found"
-    assert other_visible_response.status_code == 200

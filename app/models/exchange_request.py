@@ -13,6 +13,7 @@ from app.domain.entities import ExchangeRequest, ExchangeRequestDetails
 from app.domain.enums import ExchangeRequestStatus
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.currency import CurrencyModel
+from app.models.exchange_offer import ExchangeOfferModel
 from app.models.user import UserModel
 
 
@@ -35,6 +36,10 @@ class ExchangeRequestModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     creator: Mapped[UserModel] = relationship()
     from_currency: Mapped[CurrencyModel] = relationship(foreign_keys=[from_currency_id])
     to_currency: Mapped[CurrencyModel] = relationship(foreign_keys=[to_currency_id])
+    offers: Mapped[list[ExchangeOfferModel]] = relationship(
+        back_populates="request",
+        cascade="all, delete-orphan",
+    )
 
     def to_domain(self) -> ExchangeRequest:
         """Convert the ORM row to a domain entity."""

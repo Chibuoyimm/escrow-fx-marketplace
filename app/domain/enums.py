@@ -67,5 +67,16 @@ class ExchangeRequestStatus(StrEnum):
     """Lifecycle states for exchange requests."""
 
     REQUEST_OPEN = "request_open"
+    OFFER_PENDING = "offer_pending"
     CANCELLED = "cancelled"
     EXPIRED = "expired"
+
+
+class ExchangeOfferStatus(StrEnum):
+    """Lifecycle states for exchange offers."""
+
+    ACTIVE = "active"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+    WITHDRAWN = "withdrawn"

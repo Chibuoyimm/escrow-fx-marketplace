@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
@@ -7,16 +8,24 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.domain.enums import CorridorStatus, CurrencyStatus, ExchangeRequestStatus, RailStatus
+from app.domain.enums import (
+    CorridorStatus,
+    CurrencyStatus,
+    ExchangeOfferStatus,
+    ExchangeRequestStatus,
+    RailStatus,
+)
 from app.domain.exceptions import ConflictError, InvariantViolationError, NotFoundError
 from app.domain.value_objects import Money, Rate
 from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 from app.models.corridor import CorridorModel, CorridorRailModel
+from app.models.exchange_offer import ExchangeOfferModel
 from app.models.exchange_request import ExchangeRequestModel
 from app.repositories.sqlalchemy import (
     SqlAlchemyCorridorRailRepository,
     SqlAlchemyCorridorRepository,
     SqlAlchemyCurrencyRepository,
+    SqlAlchemyExchangeOfferRepository,
     SqlAlchemyExchangeRequestRepository,
     SqlAlchemyUserRepository,
 )
@@ -24,6 +33,7 @@ from tests.conftest import (
     build_corridor,
     build_corridor_rail,
     build_currency,
+    build_exchange_offer,
     build_exchange_request,
     build_user,
 )
@@ -85,7 +95,7 @@ async def test_corridor_and_rail_repositories_filter_inactive_records(
         )
     )
 
-    active_corridors = await corridor_repository.list_active()
+    active_corridors = await corridor_repository.list_active_details()
     active_rails = await rail_repository.list_for_corridor(corridor.id)
 
     assert [entry.id for entry in active_corridors] == [corridor.id]
@@ -206,23 +216,102 @@ async def test_exchange_request_repository_round_trips_and_scopes_by_creator(
     )
 
     fetched = await exchange_request_repository.get(older_request.id)
-    owned = await exchange_request_repository.get_for_user(older_request.id, creator.id)
     details = await exchange_request_repository.get_details_for_user(older_request.id, creator.id)
-    requests = await exchange_request_repository.list_for_user(creator.id)
     detailed_requests = await exchange_request_repository.list_details_for_user(creator.id)
 
     assert fetched.id == older_request.id
-    assert owned.id == older_request.id
     assert details.from_currency_code == "USD"
     assert details.to_currency_code == "NGN"
-    assert [request.id for request in requests] == [newer_request.id, older_request.id]
     assert [request.id for request in detailed_requests] == [newer_request.id, older_request.id]
 
     with pytest.raises(NotFoundError):
-        await exchange_request_repository.get_for_user(older_request.id, other_user.id)
-
-    with pytest.raises(NotFoundError):
         await exchange_request_repository.get_details_for_user(older_request.id, other_user.id)
+
+
+@pytest.mark.anyio
+async def test_exchange_request_repository_lists_board_visible_requests(
+    session: AsyncSession,
+) -> None:
+    user_repository = SqlAlchemyUserRepository(session)
+    currency_repository = SqlAlchemyCurrencyRepository(session)
+    exchange_request_repository = SqlAlchemyExchangeRequestRepository(session)
+
+    viewer = await user_repository.add(build_user(email="viewer@example.com"))
+    creator = await user_repository.add(build_user(email="creator@example.com"))
+    usd = await currency_repository.add(build_currency(code="USD"))
+    ngn = await currency_repository.add(build_currency(code="NGN"))
+
+    visible_request = await exchange_request_repository.add(
+        build_exchange_request(
+            creator_user_id=creator.id,
+            from_currency_id=usd.id,
+            to_currency_id=ngn.id,
+            status=ExchangeRequestStatus.REQUEST_OPEN,
+        )
+    )
+    await exchange_request_repository.add(
+        build_exchange_request(
+            creator_user_id=creator.id,
+            from_currency_id=ngn.id,
+            to_currency_id=usd.id,
+            status=ExchangeRequestStatus.CANCELLED,
+        )
+    )
+    await exchange_request_repository.add(
+        build_exchange_request(
+            creator_user_id=viewer.id,
+            from_currency_id=usd.id,
+            to_currency_id=ngn.id,
+            status=ExchangeRequestStatus.REQUEST_OPEN,
+        )
+    )
+
+    board = await exchange_request_repository.list_board_details(viewer.id)
+    visible = await exchange_request_repository.get_visible_details(visible_request.id, viewer.id)
+
+    assert [request.id for request in board] == [visible_request.id]
+    assert visible.id == visible_request.id
+    assert visible.from_currency_code == "USD"
+
+
+@pytest.mark.anyio
+async def test_exchange_offer_repository_round_trips_and_checks_active_offer(
+    session: AsyncSession,
+) -> None:
+    user_repository = SqlAlchemyUserRepository(session)
+    currency_repository = SqlAlchemyCurrencyRepository(session)
+    exchange_request_repository = SqlAlchemyExchangeRequestRepository(session)
+    exchange_offer_repository = SqlAlchemyExchangeOfferRepository(session)
+
+    creator = await user_repository.add(build_user(email="creator@example.com"))
+    offer_user = await user_repository.add(build_user(email="offer@example.com"))
+    usd = await currency_repository.add(build_currency(code="USD"))
+    ngn = await currency_repository.add(build_currency(code="NGN"))
+    exchange_request = await exchange_request_repository.add(
+        build_exchange_request(
+            creator_user_id=creator.id,
+            from_currency_id=usd.id,
+            to_currency_id=ngn.id,
+        )
+    )
+
+    created = await exchange_offer_repository.add(
+        build_exchange_offer(
+            request_id=exchange_request.id,
+            offer_user_id=offer_user.id,
+        )
+    )
+
+    offers = await exchange_offer_repository.list_details_for_request(exchange_request.id)
+    has_active = await exchange_offer_repository.has_active_offer_for_request(
+        exchange_request.id,
+        offer_user.id,
+    )
+
+    assert created.request_id == exchange_request.id
+    assert [offer.id for offer in offers] == [created.id]
+    assert offers[0].status is ExchangeOfferStatus.ACTIVE
+    assert has_active is True
 
 
 @pytest.mark.anyio
@@ -301,6 +390,48 @@ async def test_deleting_supporting_currency_restricts_exchange_request_relations
 
     assert detail.from_currency_code == "USD"
     assert row is not None
+
+
+@pytest.mark.anyio
+async def test_deleting_exchange_request_cascades_to_exchange_offers(session: AsyncSession) -> None:
+    user_repository = SqlAlchemyUserRepository(session)
+    currency_repository = SqlAlchemyCurrencyRepository(session)
+
+    creator = await user_repository.add(build_user(email="cascade-creator@example.com"))
+    offer_user = await user_repository.add(build_user(email="cascade-offer@example.com"))
+    usd = await currency_repository.add(build_currency(code="USD"))
+    ngn = await currency_repository.add(build_currency(code="NGN"))
+
+    exchange_request = ExchangeRequestModel(
+        creator_user_id=creator.id,
+        from_currency_id=usd.id,
+        to_currency_id=ngn.id,
+        from_amount=Decimal("100.00"),
+        preferred_rate=Decimal("1500.00"),
+        min_rate=Decimal("1450.00"),
+        status=ExchangeRequestStatus.REQUEST_OPEN,
+        expires_at=datetime.now(UTC),
+        offers=[
+            ExchangeOfferModel(
+                offer_user_id=offer_user.id,
+                offered_rate=Decimal("1490.00"),
+                status=ExchangeOfferStatus.ACTIVE,
+                expires_at=datetime.now(UTC),
+            )
+        ],
+    )
+    session.add(exchange_request)
+    await session.flush()
+    request_id = exchange_request.id
+
+    await session.delete(exchange_request)
+    await session.flush()
+
+    offer_rows = await session.execute(
+        select(ExchangeOfferModel).where(ExchangeOfferModel.request_id == request_id)
+    )
+
+    assert offer_rows.scalars().all() == []
 
 
 @pytest.mark.anyio

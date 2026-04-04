@@ -42,7 +42,7 @@ def build_uow() -> AbstractUnitOfWork:
 
 
 class ExchangeRequestService:
-    """Application service for exchange request creation and own-read access."""
+    """Application service for exchange request creation and reads."""
 
     def __init__(self, uow_factory: UnitOfWorkFactory | None = None) -> None:
         self._uow_factory = uow_factory or build_uow
@@ -129,15 +129,24 @@ class ExchangeRequestService:
             await uow.commit()
             return await uow.exchange_requests.get_details_for_user(created.id, user.id)
 
+    async def list_board_requests(self, viewer_user_id: UUID) -> list[ExchangeRequestDetails]:
+        """List board-visible exchange requests for an authenticated viewer."""
+        async with self._uow_factory() as uow:
+            return await uow.exchange_requests.list_board_details(viewer_user_id)
+
     async def list_requests_for_user(self, user_id: UUID) -> list[ExchangeRequestDetails]:
-        """List exchange requests for the authenticated user."""
+        """List exchange requests created by the authenticated user."""
         async with self._uow_factory() as uow:
             return await uow.exchange_requests.list_details_for_user(user_id)
 
-    async def get_request_for_user(self, request_id: UUID, user_id: UUID) -> ExchangeRequestDetails:
-        """Fetch a single exchange request for the authenticated user."""
+    async def get_visible_request(
+        self,
+        request_id: UUID,
+        viewer_user_id: UUID,
+    ) -> ExchangeRequestDetails:
+        """Fetch a request visible to the authenticated viewer."""
         async with self._uow_factory() as uow:
-            return await uow.exchange_requests.get_details_for_user(request_id, user_id)
+            return await uow.exchange_requests.get_visible_details(request_id, viewer_user_id)
 
     @staticmethod
     def _normalize_currency_code(code: str) -> str:

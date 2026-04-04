@@ -32,11 +32,14 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     exchange_request_columns = {
         column["name"] for column in inspector.get_columns("exchange_requests")
     }
+    exchange_offer_columns = {column["name"] for column in inspector.get_columns("exchange_offers")}
 
     assert "users" in inspector.get_table_names()
     assert "currencies" in inspector.get_table_names()
     assert "corridors" in inspector.get_table_names()
     assert "corridor_rails" in inspector.get_table_names()
     assert "exchange_requests" in inspector.get_table_names()
+    assert "exchange_offers" in inspector.get_table_names()
     assert "password_hash" in user_columns
     assert "expires_at" in exchange_request_columns
+    assert "offered_rate" in exchange_offer_columns

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -13,10 +13,18 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from app.domain.entities import Corridor, CorridorRail, Currency, ExchangeRequest, User
+from app.domain.entities import (
+    Corridor,
+    CorridorRail,
+    Currency,
+    ExchangeOffer,
+    ExchangeRequest,
+    User,
+)
 from app.domain.enums import (
     CorridorStatus,
     CurrencyStatus,
+    ExchangeOfferStatus,
     ExchangeRequestStatus,
     FlowType,
     KycStatus,
@@ -164,7 +172,31 @@ def build_exchange_request(
         preferred_rate=preferred_rate,
         min_rate=min_rate,
         status=status,
-        expires_at=expires_at or now(),
+        expires_at=expires_at or (created + timedelta(hours=1)),
+        created_at=created,
+        updated_at=updated_at or created,
+    )
+
+
+def build_exchange_offer(
+    *,
+    request_id: UUID,
+    offer_user_id: UUID,
+    offer_id: UUID | None = None,
+    offered_rate: Decimal = Decimal("1495.00"),
+    status: ExchangeOfferStatus = ExchangeOfferStatus.ACTIVE,
+    expires_at: datetime | None = None,
+    created_at: datetime | None = None,
+    updated_at: datetime | None = None,
+) -> ExchangeOffer:
+    created = created_at or now()
+    return ExchangeOffer(
+        id=offer_id or uuid4(),
+        request_id=request_id,
+        offer_user_id=offer_user_id,
+        offered_rate=offered_rate,
+        status=status,
+        expires_at=expires_at or (created + timedelta(hours=1)),
         created_at=created,
         updated_at=updated_at or created,
     )

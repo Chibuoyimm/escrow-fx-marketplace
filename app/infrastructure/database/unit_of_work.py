@@ -10,6 +10,7 @@ from app.repositories.protocols import (
     CorridorRailRepositoryProtocol,
     CorridorRepositoryProtocol,
     CurrencyRepositoryProtocol,
+    ExchangeOfferRepositoryProtocol,
     ExchangeRequestRepositoryProtocol,
     UserRepositoryProtocol,
 )
@@ -17,6 +18,7 @@ from app.repositories.sqlalchemy import (
     SqlAlchemyCorridorRailRepository,
     SqlAlchemyCorridorRepository,
     SqlAlchemyCurrencyRepository,
+    SqlAlchemyExchangeOfferRepository,
     SqlAlchemyExchangeRequestRepository,
     SqlAlchemyUserRepository,
 )
@@ -30,6 +32,7 @@ class AbstractUnitOfWork(ABC):
     corridors: CorridorRepositoryProtocol
     corridor_rails: CorridorRailRepositoryProtocol
     exchange_requests: ExchangeRequestRepositoryProtocol
+    exchange_offers: ExchangeOfferRepositoryProtocol
 
     @abstractmethod
     async def __aenter__(self) -> AbstractUnitOfWork:
@@ -62,6 +65,7 @@ class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
         self.corridors = SqlAlchemyCorridorRepository(self.session)
         self.corridor_rails = SqlAlchemyCorridorRailRepository(self.session)
         self.exchange_requests = SqlAlchemyExchangeRequestRepository(self.session)
+        self.exchange_offers = SqlAlchemyExchangeOfferRepository(self.session)
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:

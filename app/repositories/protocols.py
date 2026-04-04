@@ -10,6 +10,8 @@ from app.domain.entities import (
     CorridorDetails,
     CorridorRail,
     Currency,
+    ExchangeOffer,
+    ExchangeOfferDetails,
     ExchangeRequest,
     ExchangeRequestDetails,
     User,
@@ -83,10 +85,6 @@ class CorridorRepositoryProtocol(ABC):
     ) -> CorridorDetails:
         """Fetch an active corridor read model by ordered currency pair."""
 
-    @abstractmethod
-    async def list_active(self) -> list[Corridor]:
-        """List active corridors."""
-
 
 class CorridorRailRepositoryProtocol(ABC):
     """Corridor rail repository contract."""
@@ -108,16 +106,12 @@ class ExchangeRequestRepositoryProtocol(ABC):
         """Persist an exchange request."""
 
     @abstractmethod
+    async def update(self, exchange_request: ExchangeRequest) -> ExchangeRequest:
+        """Persist changes to an existing exchange request."""
+
+    @abstractmethod
     async def get(self, request_id: UUID) -> ExchangeRequest:
         """Fetch an exchange request by identifier."""
-
-    @abstractmethod
-    async def get_for_user(self, request_id: UUID, user_id: UUID) -> ExchangeRequest:
-        """Fetch a user's exchange request by identifier."""
-
-    @abstractmethod
-    async def list_for_user(self, user_id: UUID) -> list[ExchangeRequest]:
-        """List exchange requests for a user."""
 
     @abstractmethod
     async def get_details_for_user(self, request_id: UUID, user_id: UUID) -> ExchangeRequestDetails:
@@ -126,3 +120,31 @@ class ExchangeRequestRepositoryProtocol(ABC):
     @abstractmethod
     async def list_details_for_user(self, user_id: UUID) -> list[ExchangeRequestDetails]:
         """List exchange request read models for a user."""
+
+    @abstractmethod
+    async def list_board_details(self, viewer_user_id: UUID) -> list[ExchangeRequestDetails]:
+        """List board-visible exchange request read models for a viewer."""
+
+    @abstractmethod
+    async def get_visible_details(
+        self,
+        request_id: UUID,
+        viewer_user_id: UUID,
+    ) -> ExchangeRequestDetails:
+        """Fetch an exchange request read model visible to a viewer."""
+
+
+class ExchangeOfferRepositoryProtocol(ABC):
+    """Exchange offer repository contract."""
+
+    @abstractmethod
+    async def add(self, exchange_offer: ExchangeOffer) -> ExchangeOffer:
+        """Persist an exchange offer."""
+
+    @abstractmethod
+    async def list_details_for_request(self, request_id: UUID) -> list[ExchangeOfferDetails]:
+        """List exchange offer read models for a request."""
+
+    @abstractmethod
+    async def has_active_offer_for_request(self, request_id: UUID, user_id: UUID) -> bool:
+        """Check whether a user already has an active offer on a request."""
