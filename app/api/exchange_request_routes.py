@@ -67,6 +67,20 @@ async def list_my_exchange_requests(
     ]
 
 
+@exchange_request_router.post("/{request_id}/cancel", response_model=ExchangeRequestResponse)
+async def cancel_exchange_request(
+    request_id: UUID,
+    principal: AuthenticatedPrincipal = current_principal_dependency,
+    exchange_request_service: ExchangeRequestService = exchange_request_service_dependency,
+) -> ExchangeRequestResponse:
+    """Cancel an open or pending request owned by the authenticated user."""
+    exchange_request = await exchange_request_service.cancel_request(
+        request_id=request_id,
+        requester_user_id=principal.user_id,
+    )
+    return ExchangeRequestResponse.model_validate(exchange_request)
+
+
 @exchange_request_router.post(
     "/{request_id}/offers",
     response_model=ExchangeOfferResponse,

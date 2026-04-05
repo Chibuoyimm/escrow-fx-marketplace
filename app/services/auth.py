@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import replace
-from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from app.domain.auth import AuthenticatedPrincipal
@@ -16,17 +14,9 @@ from app.domain.exceptions import (
     InvariantViolationError,
     NotFoundError,
 )
-from app.infrastructure.database.session import AsyncSessionFactory
-from app.infrastructure.database.unit_of_work import AbstractUnitOfWork, SqlAlchemyUnitOfWork
 from app.infrastructure.security import SecurityService
 from app.schemas.auth import AccessTokenResponse
-
-UnitOfWorkFactory = Callable[[], AbstractUnitOfWork]
-
-
-def utc_now() -> datetime:
-    """Return the current UTC time."""
-    return datetime.now(UTC)
+from app.services._shared import UnitOfWorkFactory, build_uow, utc_now
 
 
 def normalize_country_code(country: str) -> str:
@@ -35,11 +25,6 @@ def normalize_country_code(country: str) -> str:
     if len(normalized_country) != 2 or not normalized_country.isalpha():
         raise InvariantViolationError("Country must be a two-letter ISO-style country code.")
     return normalized_country
-
-
-def build_uow() -> AbstractUnitOfWork:
-    """Build the default unit of work."""
-    return SqlAlchemyUnitOfWork(AsyncSessionFactory)
 
 
 class AuthService:

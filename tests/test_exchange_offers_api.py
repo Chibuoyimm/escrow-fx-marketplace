@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.domain.enums import (
     CorridorStatus,
     CurrencyStatus,
+    ExchangeOfferStatus,
     ExchangeRequestStatus,
     KycStatus,
     UserStatus,
@@ -362,3 +363,136 @@ async def test_list_exchange_request_offers_returns_request_creator_view(
     )
     assert other_response.status_code == 403
     assert other_response.json()["error_code"] == "authorization_error"
+
+
+async def test_withdraw_exchange_offer_marks_offer_withdrawn_and_reopens_request_if_last_active(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = await seed_marketplace_request(
+        session_factory,
+        request_status=ExchangeRequestStatus.OFFER_PENDING,
+    )
+    offer_user_id, offer_headers = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="withdraw-owner@example.com",
+    )
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        offer = await uow.exchange_offers.add(
+            build_exchange_offer(
+                request_id=seeded["request_id"],
+                offer_user_id=offer_user_id,
+            )
+        )
+        await uow.commit()
+
+    response = await client.post(f"/api/v1/offers/{offer.id}/withdraw", headers=offer_headers)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "withdrawn"
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        reloaded_offer = await uow.exchange_offers.get(offer.id)
+        reloaded_request = await uow.exchange_requests.get(seeded["request_id"])
+        assert reloaded_offer.status is ExchangeOfferStatus.WITHDRAWN
+        assert reloaded_request.status is ExchangeRequestStatus.REQUEST_OPEN
+
+
+async def test_withdraw_exchange_offer_hides_other_users_offer(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = await seed_marketplace_request(session_factory)
+    offer_user_id, _ = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="withdraw-hidden-owner@example.com",
+    )
+    _, other_headers = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="withdraw-hidden-other@example.com",
+    )
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        offer = await uow.exchange_offers.add(
+            build_exchange_offer(
+                request_id=seeded["request_id"],
+                offer_user_id=offer_user_id,
+            )
+        )
+        await uow.commit()
+
+    response = await client.post(f"/api/v1/offers/{offer.id}/withdraw", headers=other_headers)
+
+    assert response.status_code == 404
+    assert response.json()["error_code"] == "not_found"
+
+
+async def test_reject_exchange_offer_marks_offer_rejected_and_reopens_request_if_last_active(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = await seed_marketplace_request(
+        session_factory,
+        request_status=ExchangeRequestStatus.OFFER_PENDING,
+        creator_email="reject-owner@example.com",
+    )
+    creator_headers = await login_headers(auth_service, email="reject-owner@example.com")
+    offer_user_id, _ = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="reject-offerer@example.com",
+    )
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        offer = await uow.exchange_offers.add(
+            build_exchange_offer(
+                request_id=seeded["request_id"],
+                offer_user_id=offer_user_id,
+            )
+        )
+        await uow.commit()
+
+    response = await client.post(f"/api/v1/offers/{offer.id}/reject", headers=creator_headers)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "rejected"
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        reloaded_offer = await uow.exchange_offers.get(offer.id)
+        reloaded_request = await uow.exchange_requests.get(seeded["request_id"])
+        assert reloaded_offer.status is ExchangeOfferStatus.REJECTED
+        assert reloaded_request.status is ExchangeRequestStatus.REQUEST_OPEN
+
+
+async def test_reject_exchange_offer_requires_request_creator(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = await seed_marketplace_request(session_factory)
+    offer_user_id, offer_headers = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="reject-owner-check@example.com",
+    )
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        offer = await uow.exchange_offers.add(
+            build_exchange_offer(
+                request_id=seeded["request_id"],
+                offer_user_id=offer_user_id,
+            )
+        )
+        await uow.commit()
+
+    response = await client.post(f"/api/v1/offers/{offer.id}/reject", headers=offer_headers)
+
+    assert response.status_code == 403
+    assert response.json()["error_code"] == "authorization_error"

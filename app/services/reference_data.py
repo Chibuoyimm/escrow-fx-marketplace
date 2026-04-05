@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from uuid import UUID
@@ -10,15 +9,7 @@ from uuid import UUID
 from app.domain.entities import CorridorDetails, Currency
 from app.domain.enums import CurrencyStatus
 from app.domain.exceptions import NotFoundError
-from app.infrastructure.database.session import AsyncSessionFactory
-from app.infrastructure.database.unit_of_work import AbstractUnitOfWork, SqlAlchemyUnitOfWork
-
-UnitOfWorkFactory = Callable[[], AbstractUnitOfWork]
-
-
-def build_uow() -> AbstractUnitOfWork:
-    """Build the default unit of work."""
-    return SqlAlchemyUnitOfWork(AsyncSessionFactory)
+from app.services._shared import UnitOfWorkFactory, build_uow
 
 
 @dataclass(frozen=True, slots=True)

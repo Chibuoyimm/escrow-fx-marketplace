@@ -6,15 +6,14 @@ import argparse
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
 from app.domain.entities import Corridor, CorridorRail, Currency
 from app.domain.enums import CorridorStatus, CurrencyStatus, FlowType, RailStatus
 from app.domain.exceptions import NotFoundError
-from app.infrastructure.database.session import AsyncSessionFactory
-from app.infrastructure.database.unit_of_work import AbstractUnitOfWork, SqlAlchemyUnitOfWork
+from app.infrastructure.database.unit_of_work import AbstractUnitOfWork
+from app.services._shared import build_uow, utc_now
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,16 +110,6 @@ CORRIDOR_SEEDS: tuple[CorridorSeed, ...] = (
         ),
     ),
 )
-
-
-def build_uow() -> AbstractUnitOfWork:
-    """Build the default unit of work for seeding."""
-    return SqlAlchemyUnitOfWork(AsyncSessionFactory)
-
-
-def utc_now() -> datetime:
-    """Return the current UTC time."""
-    return datetime.now(UTC)
 
 
 async def seed_reference_data(

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from dataclasses import replace
+from datetime import timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -11,6 +11,7 @@ from app.domain.entities import ExchangeRequest, ExchangeRequestDetails
 from app.domain.enums import (
     CorridorStatus,
     CurrencyStatus,
+    ExchangeOfferStatus,
     ExchangeRequestStatus,
     KycStatus,
     UserStatus,
@@ -22,23 +23,7 @@ from app.domain.exceptions import (
 )
 from app.domain.value_objects import Money, Rate
 from app.infrastructure.config import settings
-from app.infrastructure.database.session import AsyncSessionFactory
-from app.infrastructure.database.unit_of_work import (
-    AbstractUnitOfWork,
-    SqlAlchemyUnitOfWork,
-)
-
-UnitOfWorkFactory = Callable[[], AbstractUnitOfWork]
-
-
-def utc_now() -> datetime:
-    """Return the current UTC time."""
-    return datetime.now(UTC)
-
-
-def build_uow() -> AbstractUnitOfWork:
-    """Build the default unit of work."""
-    return SqlAlchemyUnitOfWork(AsyncSessionFactory)
+from app.services._shared import UnitOfWorkFactory, as_utc, build_uow, utc_now
 
 
 class ExchangeRequestService:
@@ -147,6 +132,50 @@ class ExchangeRequestService:
         """Fetch a request visible to the authenticated viewer."""
         async with self._uow_factory() as uow:
             return await uow.exchange_requests.get_visible_details(request_id, viewer_user_id)
+
+    async def cancel_request(
+        self,
+        *,
+        request_id: UUID,
+        requester_user_id: UUID,
+    ) -> ExchangeRequestDetails:
+        """Cancel an open or pending request owned by the authenticated user."""
+        current_time = utc_now()
+
+        async with self._uow_factory() as uow:
+            exchange_request = await uow.exchange_requests.get(request_id)
+            if exchange_request.creator_user_id != requester_user_id:
+                raise NotFoundError(f"Exchange request '{request_id}' was not found.")
+            if exchange_request.status not in {
+                ExchangeRequestStatus.REQUEST_OPEN,
+                ExchangeRequestStatus.OFFER_PENDING,
+            }:
+                raise InvariantViolationError("This exchange request can no longer be cancelled.")
+            if as_utc(exchange_request.expires_at) <= current_time:
+                raise InvariantViolationError("This exchange request has already expired.")
+
+            await uow.exchange_requests.update(
+                replace(
+                    exchange_request,
+                    status=ExchangeRequestStatus.CANCELLED,
+                    updated_at=current_time,
+                )
+            )
+
+            offers = await uow.exchange_offers.list_for_request(exchange_request.id)
+            for offer in offers:
+                if offer.status is not ExchangeOfferStatus.ACTIVE:
+                    continue
+                await uow.exchange_offers.update(
+                    replace(
+                        offer,
+                        status=ExchangeOfferStatus.REJECTED,
+                        updated_at=current_time,
+                    )
+                )
+
+            await uow.commit()
+            return await uow.exchange_requests.get_details_for_user(request_id, requester_user_id)
 
     @staticmethod
     def _normalize_currency_code(code: str) -> str:

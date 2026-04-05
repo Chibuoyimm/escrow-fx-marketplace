@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from uuid import UUID, uuid4
 
 from app.domain.entities import TradeContract, TradeContractDetails
@@ -15,30 +14,7 @@ from app.domain.enums import (
     TradeContractStatus,
 )
 from app.domain.exceptions import AuthorizationError, InvariantViolationError, NotFoundError
-from app.infrastructure.database.session import AsyncSessionFactory
-from app.infrastructure.database.unit_of_work import (
-    AbstractUnitOfWork,
-    SqlAlchemyUnitOfWork,
-)
-
-UnitOfWorkFactory = Callable[[], AbstractUnitOfWork]
-
-
-def utc_now() -> datetime:
-    """Return the current UTC time."""
-    return datetime.now(UTC)
-
-
-def as_utc(value: datetime) -> datetime:
-    """Normalize datetimes returned by different DB backends."""
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
-
-
-def build_uow() -> AbstractUnitOfWork:
-    """Build the default unit of work."""
-    return SqlAlchemyUnitOfWork(AsyncSessionFactory)
+from app.services._shared import UnitOfWorkFactory, as_utc, build_uow, utc_now
 
 
 class TradeService:

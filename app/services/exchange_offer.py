@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import replace
-from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -14,26 +12,11 @@ from app.domain.exceptions import (
     AuthorizationError,
     ConflictError,
     InvariantViolationError,
+    NotFoundError,
     PreconditionFailedError,
 )
 from app.domain.value_objects import Rate
-from app.infrastructure.database.session import AsyncSessionFactory
-from app.infrastructure.database.unit_of_work import (
-    AbstractUnitOfWork,
-    SqlAlchemyUnitOfWork,
-)
-
-UnitOfWorkFactory = Callable[[], AbstractUnitOfWork]
-
-
-def utc_now() -> datetime:
-    """Return the current UTC time."""
-    return datetime.now(UTC)
-
-
-def build_uow() -> AbstractUnitOfWork:
-    """Build the default unit of work."""
-    return SqlAlchemyUnitOfWork(AsyncSessionFactory)
+from app.services._shared import UnitOfWorkFactory, as_utc, build_uow, utc_now
 
 
 class ExchangeOfferService:
@@ -41,6 +24,17 @@ class ExchangeOfferService:
 
     def __init__(self, uow_factory: UnitOfWorkFactory | None = None) -> None:
         self._uow_factory = uow_factory or build_uow
+
+    @staticmethod
+    def _request_status_after_active_offer_change(
+        exchange_request_status: ExchangeRequestStatus,
+        offers: list[ExchangeOffer],
+    ) -> ExchangeRequestStatus:
+        if exchange_request_status is not ExchangeRequestStatus.OFFER_PENDING:
+            return exchange_request_status
+        if any(offer.status is ExchangeOfferStatus.ACTIVE for offer in offers):
+            return ExchangeRequestStatus.OFFER_PENDING
+        return ExchangeRequestStatus.REQUEST_OPEN
 
     async def create_offer(
         self,
@@ -69,6 +63,9 @@ class ExchangeOfferService:
                 )
 
             await uow.exchange_requests.get_visible_details(request_id, offer_user_id)
+
+            if as_utc(exchange_request.expires_at) <= current_time:
+                raise InvariantViolationError("This exchange request has expired.")
 
             if await uow.exchange_offers.has_active_offer_for_request(request_id, offer_user_id):
                 raise ConflictError("You already have an active offer on that exchange request.")
@@ -113,6 +110,108 @@ class ExchangeOfferService:
                     "Only the request creator can view offers for this exchange request."
                 )
             return await uow.exchange_offers.list_details_for_request(request_id)
+
+    async def withdraw_offer(
+        self,
+        *,
+        offer_id: UUID,
+        offer_user_id: UUID,
+    ) -> ExchangeOffer:
+        """Withdraw an active offer owned by the authenticated user."""
+        current_time = utc_now()
+
+        async with self._uow_factory() as uow:
+            offer = await uow.exchange_offers.get(offer_id)
+            if offer.offer_user_id != offer_user_id:
+                raise NotFoundError(f"Exchange offer '{offer_id}' was not found.")
+            if offer.status is not ExchangeOfferStatus.ACTIVE:
+                raise InvariantViolationError("This offer can no longer be withdrawn.")
+            if as_utc(offer.expires_at) <= current_time:
+                raise InvariantViolationError("This offer has expired.")
+
+            exchange_request = await uow.exchange_requests.get(offer.request_id)
+            if exchange_request.status not in {
+                ExchangeRequestStatus.REQUEST_OPEN,
+                ExchangeRequestStatus.OFFER_PENDING,
+            }:
+                raise InvariantViolationError("This offer can no longer be withdrawn.")
+
+            updated_offer = await uow.exchange_offers.update(
+                replace(
+                    offer,
+                    status=ExchangeOfferStatus.WITHDRAWN,
+                    updated_at=current_time,
+                )
+            )
+
+            offers = await uow.exchange_offers.list_for_request(exchange_request.id)
+            request_status = self._request_status_after_active_offer_change(
+                exchange_request.status,
+                offers,
+            )
+            if request_status is not exchange_request.status:
+                await uow.exchange_requests.update(
+                    replace(
+                        exchange_request,
+                        status=request_status,
+                        updated_at=current_time,
+                    )
+                )
+
+            await uow.commit()
+            return updated_offer
+
+    async def reject_offer(
+        self,
+        *,
+        offer_id: UUID,
+        requester_user_id: UUID,
+    ) -> ExchangeOffer:
+        """Reject an active offer as the request creator."""
+        current_time = utc_now()
+
+        async with self._uow_factory() as uow:
+            offer = await uow.exchange_offers.get(offer_id)
+            if offer.status is not ExchangeOfferStatus.ACTIVE:
+                raise InvariantViolationError("This offer can no longer be rejected.")
+            if as_utc(offer.expires_at) <= current_time:
+                raise InvariantViolationError("This offer has expired.")
+
+            exchange_request = await uow.exchange_requests.get(offer.request_id)
+            if exchange_request.creator_user_id != requester_user_id:
+                raise AuthorizationError("Only the request creator can reject this offer.")
+            if exchange_request.status not in {
+                ExchangeRequestStatus.REQUEST_OPEN,
+                ExchangeRequestStatus.OFFER_PENDING,
+            }:
+                raise InvariantViolationError("This offer can no longer be rejected.")
+            if as_utc(exchange_request.expires_at) <= current_time:
+                raise InvariantViolationError("This exchange request has expired.")
+
+            updated_offer = await uow.exchange_offers.update(
+                replace(
+                    offer,
+                    status=ExchangeOfferStatus.REJECTED,
+                    updated_at=current_time,
+                )
+            )
+
+            offers = await uow.exchange_offers.list_for_request(exchange_request.id)
+            request_status = self._request_status_after_active_offer_change(
+                exchange_request.status,
+                offers,
+            )
+            if request_status is not exchange_request.status:
+                await uow.exchange_requests.update(
+                    replace(
+                        exchange_request,
+                        status=request_status,
+                        updated_at=current_time,
+                    )
+                )
+
+            await uow.commit()
+            return updated_offer
 
 
 def get_exchange_offer_service() -> ExchangeOfferService:

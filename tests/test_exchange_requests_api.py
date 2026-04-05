@@ -26,6 +26,7 @@ from app.services.exchange_request import ExchangeRequestService, get_exchange_r
 from tests.conftest import (
     build_corridor,
     build_currency,
+    build_exchange_offer,
     build_exchange_request,
     build_user,
 )
@@ -583,3 +584,120 @@ async def test_get_exchange_request_by_id_returns_own_or_board_visible_request(
     assert visible_response.json()["id"] == str(visible_request.id)
     assert hidden_response.status_code == 404
     assert hidden_response.json()["error_code"] == "not_found"
+
+
+async def test_cancel_exchange_request_cancels_active_request_and_rejects_offers(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    currencies = await seed_currencies_and_corridor(session_factory)
+    creator_id, creator_headers = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="cancel-owner@example.com",
+    )
+    offer_user_id, _ = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="cancel-offerer@example.com",
+    )
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        exchange_request = await uow.exchange_requests.add(
+            build_exchange_request(
+                creator_user_id=creator_id,
+                from_currency_id=currencies["from_currency_id"],
+                to_currency_id=currencies["to_currency_id"],
+                status=ExchangeRequestStatus.OFFER_PENDING,
+            )
+        )
+        active_offer = await uow.exchange_offers.add(
+            build_exchange_offer(
+                request_id=exchange_request.id,
+                offer_user_id=offer_user_id,
+            )
+        )
+        await uow.commit()
+
+    response = await client.post(
+        f"/api/v1/exchange-requests/{exchange_request.id}/cancel",
+        headers=creator_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        reloaded_request = await uow.exchange_requests.get(exchange_request.id)
+        reloaded_offer = await uow.exchange_offers.get(active_offer.id)
+        assert reloaded_request.status is ExchangeRequestStatus.CANCELLED
+        assert reloaded_offer.status.name == "REJECTED"
+
+
+async def test_cancel_exchange_request_hides_other_users_request(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    currencies = await seed_currencies_and_corridor(session_factory)
+    owner_id, _ = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="hidden-cancel-owner@example.com",
+    )
+    _, other_headers = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="hidden-cancel-viewer@example.com",
+    )
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        exchange_request = await uow.exchange_requests.add(
+            build_exchange_request(
+                creator_user_id=owner_id,
+                from_currency_id=currencies["from_currency_id"],
+                to_currency_id=currencies["to_currency_id"],
+            )
+        )
+        await uow.commit()
+
+    response = await client.post(
+        f"/api/v1/exchange-requests/{exchange_request.id}/cancel",
+        headers=other_headers,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error_code"] == "not_found"
+
+
+async def test_cancel_exchange_request_rejects_locked_request(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    currencies = await seed_currencies_and_corridor(session_factory)
+    owner_id, owner_headers = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="locked-cancel-owner@example.com",
+    )
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        exchange_request = await uow.exchange_requests.add(
+            build_exchange_request(
+                creator_user_id=owner_id,
+                from_currency_id=currencies["from_currency_id"],
+                to_currency_id=currencies["to_currency_id"],
+                status=ExchangeRequestStatus.TERMS_LOCKED,
+            )
+        )
+        await uow.commit()
+
+    response = await client.post(
+        f"/api/v1/exchange-requests/{exchange_request.id}/cancel",
+        headers=owner_headers,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error_code"] == "invariant_violation"
