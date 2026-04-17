@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, and_, or_, select
+from sqlalchemy import Select, and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload, with_loader_criteria
@@ -31,6 +31,7 @@ from app.domain.enums import (
     ExchangeOfferStatus,
     ExchangeRequestStatus,
     RailStatus,
+    TradeContractStatus,
 )
 from app.domain.exceptions import ConflictError, NotFoundError
 from app.infrastructure.exceptions import InfrastructureError
@@ -56,6 +57,10 @@ class SqlAlchemyRepository:
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+
+    @staticmethod
+    def _rowcount(result: Any) -> int:
+        return int(getattr(result, "rowcount", 0) or 0)
 
     async def _flush_or_raise_conflict(self, conflict_detail: str) -> None:
         try:
@@ -432,6 +437,30 @@ class SqlAlchemyExchangeRequestRepository(SqlAlchemyRepository, ExchangeRequestR
             raise NotFoundError(f"Exchange request '{request_id}' was not found.")
         return model.to_details()
 
+    async def expire_due(self, now: datetime) -> int:
+        result = await self.session.execute(
+            update(ExchangeRequestModel)
+            .where(
+                ExchangeRequestModel.status.in_(self._board_visible_statuses()),
+                ExchangeRequestModel.expires_at <= now,
+            )
+            .values(status=ExchangeRequestStatus.EXPIRED, updated_at=now)
+        )
+        return self._rowcount(result)
+
+    async def reopen_pending_without_active_offers(self, now: datetime) -> int:
+        result = await self.session.execute(
+            update(ExchangeRequestModel)
+            .where(
+                ExchangeRequestModel.status == ExchangeRequestStatus.OFFER_PENDING,
+                ~ExchangeRequestModel.offers.any(
+                    ExchangeOfferModel.status == ExchangeOfferStatus.ACTIVE
+                ),
+            )
+            .values(status=ExchangeRequestStatus.REQUEST_OPEN, updated_at=now)
+        )
+        return self._rowcount(result)
+
 
 class SqlAlchemyExchangeOfferRepository(SqlAlchemyRepository, ExchangeOfferRepositoryProtocol):
     """Exchange offer repository implementation."""
@@ -497,6 +526,22 @@ class SqlAlchemyExchangeOfferRepository(SqlAlchemyRepository, ExchangeOfferRepos
         result = await self.session.execute(statement)
         return result.scalar_one_or_none() is not None
 
+    async def expire_due(self, now: datetime) -> int:
+        result = await self.session.execute(
+            update(ExchangeOfferModel)
+            .where(
+                ExchangeOfferModel.status == ExchangeOfferStatus.ACTIVE,
+                or_(
+                    ExchangeOfferModel.expires_at <= now,
+                    ExchangeOfferModel.request.has(
+                        ExchangeRequestModel.status == ExchangeRequestStatus.EXPIRED
+                    ),
+                ),
+            )
+            .values(status=ExchangeOfferStatus.EXPIRED, updated_at=now)
+        )
+        return self._rowcount(result)
+
 
 class SqlAlchemyTradeContractRepository(SqlAlchemyRepository, TradeContractRepositoryProtocol):
     """Trade contract repository implementation."""
@@ -527,6 +572,12 @@ class SqlAlchemyTradeContractRepository(SqlAlchemyRepository, TradeContractRepos
         await self._flush_or_raise_conflict("That trade contract could not be saved.")
         return model.to_domain()
 
+    async def get(self, trade_id: UUID) -> TradeContract:
+        model = await self.session.get(TradeContractModel, trade_id)
+        if model is None:
+            raise NotFoundError(f"Trade '{trade_id}' was not found.")
+        return model.to_domain()
+
     async def get_for_participant(self, trade_id: UUID, user_id: UUID) -> TradeContractDetails:
         statement: Select[tuple[TradeContractModel]] = (
             select(TradeContractModel)
@@ -546,3 +597,14 @@ class SqlAlchemyTradeContractRepository(SqlAlchemyRepository, TradeContractRepos
         if model is None:
             raise NotFoundError(f"Trade '{trade_id}' was not found.")
         return model.to_details()
+
+    async def cancel_due_unfunded(self, now: datetime) -> int:
+        result = await self.session.execute(
+            update(TradeContractModel)
+            .where(
+                TradeContractModel.status == TradeContractStatus.TERMS_LOCKED,
+                TradeContractModel.funding_deadline_at <= now,
+            )
+            .values(status=TradeContractStatus.CANCELLED, updated_at=now)
+        )
+        return self._rowcount(result)

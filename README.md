@@ -98,6 +98,12 @@ Seed reference currencies and corridors with:
 make seed-reference-data
 ```
 
+Expire due marketplace records with:
+
+```bash
+make expire-marketplace
+```
+
 ## Run
 
 ```bash

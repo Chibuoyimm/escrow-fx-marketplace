@@ -6,7 +6,6 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from app.infrastructure.database.base import utc_now as _db_utc_now
-from app.infrastructure.database.session import AsyncSessionFactory
 from app.infrastructure.database.unit_of_work import (
     AbstractUnitOfWork,
     SqlAlchemyUnitOfWork,
@@ -31,4 +30,6 @@ def as_utc(value: datetime) -> datetime:
 
 def build_uow() -> AbstractUnitOfWork:
     """Build the default unit of work."""
+    from app.infrastructure.database.session import AsyncSessionFactory
+
     return SqlAlchemyUnitOfWork(AsyncSessionFactory)

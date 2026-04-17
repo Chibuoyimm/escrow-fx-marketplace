@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 from uuid import UUID
 
 from app.domain.entities import (
@@ -135,6 +136,14 @@ class ExchangeRequestRepositoryProtocol(ABC):
     ) -> ExchangeRequestDetails:
         """Fetch an exchange request read model visible to a viewer."""
 
+    @abstractmethod
+    async def expire_due(self, now: datetime) -> int:
+        """Expire open or pending exchange requests whose deadline has passed."""
+
+    @abstractmethod
+    async def reopen_pending_without_active_offers(self, now: datetime) -> int:
+        """Reopen pending requests that no longer have active offers."""
+
 
 class ExchangeOfferRepositoryProtocol(ABC):
     """Exchange offer repository contract."""
@@ -163,6 +172,10 @@ class ExchangeOfferRepositoryProtocol(ABC):
     async def has_active_offer_for_request(self, request_id: UUID, user_id: UUID) -> bool:
         """Check whether a user already has an active offer on a request."""
 
+    @abstractmethod
+    async def expire_due(self, now: datetime) -> int:
+        """Expire active exchange offers whose deadline or parent request has expired."""
+
 
 class TradeContractRepositoryProtocol(ABC):
     """Trade contract repository contract."""
@@ -172,5 +185,13 @@ class TradeContractRepositoryProtocol(ABC):
         """Persist a trade contract."""
 
     @abstractmethod
+    async def get(self, trade_id: UUID) -> TradeContract:
+        """Fetch a trade contract by identifier."""
+
+    @abstractmethod
     async def get_for_participant(self, trade_id: UUID, user_id: UUID) -> TradeContractDetails:
         """Fetch a trade contract visible to a participant."""
+
+    @abstractmethod
+    async def cancel_due_unfunded(self, now: datetime) -> int:
+        """Cancel terms-locked trades whose funding deadline has passed."""
