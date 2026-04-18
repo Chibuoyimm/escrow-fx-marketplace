@@ -15,6 +15,7 @@ from app.domain.enums import (
 )
 from app.domain.exceptions import AuthorizationError, InvariantViolationError, NotFoundError
 from app.services._shared import UnitOfWorkFactory, as_utc, build_uow, utc_now
+from app.services.outbox import build_outbox_event
 
 
 class TradeService:
@@ -103,6 +104,49 @@ class TradeService:
                         existing_offer,
                         status=new_status,
                         updated_at=current_time,
+                    )
+                )
+                if new_status is ExchangeOfferStatus.ACCEPTED:
+                    await uow.outbox_events.add(
+                        build_outbox_event(
+                            event_type="exchange_offer.accepted",
+                            aggregate_type="exchange_offer",
+                            aggregate_id=existing_offer.id,
+                            recipient_user_id=existing_offer.offer_user_id,
+                            payload={
+                                "offer_id": str(existing_offer.id),
+                                "request_id": str(exchange_request.id),
+                                "trade_contract_id": str(trade_contract.id),
+                            },
+                        )
+                    )
+                else:
+                    await uow.outbox_events.add(
+                        build_outbox_event(
+                            event_type="exchange_offer.rejected",
+                            aggregate_type="exchange_offer",
+                            aggregate_id=existing_offer.id,
+                            recipient_user_id=existing_offer.offer_user_id,
+                            payload={
+                                "offer_id": str(existing_offer.id),
+                                "request_id": str(exchange_request.id),
+                                "reason": "competing_offer_accepted",
+                            },
+                        )
+                    )
+
+            for recipient_user_id in (exchange_request.creator_user_id, offer.offer_user_id):
+                await uow.outbox_events.add(
+                    build_outbox_event(
+                        event_type="trade_contract.locked",
+                        aggregate_type="trade_contract",
+                        aggregate_id=trade_contract.id,
+                        recipient_user_id=recipient_user_id,
+                        payload={
+                            "trade_contract_id": str(trade_contract.id),
+                            "request_id": str(exchange_request.id),
+                            "accepted_offer_id": str(offer.id),
+                        },
                     )
                 )
 

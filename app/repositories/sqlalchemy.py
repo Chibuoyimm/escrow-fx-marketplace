@@ -21,6 +21,7 @@ from app.domain.entities import (
     ExchangeOfferDetails,
     ExchangeRequest,
     ExchangeRequestDetails,
+    OutboxEvent,
     TradeContract,
     TradeContractDetails,
     User,
@@ -30,6 +31,7 @@ from app.domain.enums import (
     CurrencyStatus,
     ExchangeOfferStatus,
     ExchangeRequestStatus,
+    OutboxEventStatus,
     RailStatus,
     TradeContractStatus,
     UserStatus,
@@ -40,6 +42,7 @@ from app.models.corridor import CorridorModel, CorridorRailModel
 from app.models.currency import CurrencyModel
 from app.models.exchange_offer import ExchangeOfferModel
 from app.models.exchange_request import ExchangeRequestModel
+from app.models.outbox_event import OutboxEventModel
 from app.models.trade_contract import TradeContractModel
 from app.models.user import UserModel
 from app.repositories.protocols import (
@@ -48,6 +51,7 @@ from app.repositories.protocols import (
     CurrencyRepositoryProtocol,
     ExchangeOfferRepositoryProtocol,
     ExchangeRequestRepositoryProtocol,
+    OutboxEventRepositoryProtocol,
     TradeContractRepositoryProtocol,
     UserRepositoryProtocol,
 )
@@ -675,3 +679,41 @@ class SqlAlchemyTradeContractRepository(SqlAlchemyRepository, TradeContractRepos
             .values(status=TradeContractStatus.CANCELLED, updated_at=now)
         )
         return self._rowcount(result)
+
+
+class SqlAlchemyOutboxEventRepository(SqlAlchemyRepository, OutboxEventRepositoryProtocol):
+    """Outbox event repository implementation."""
+
+    async def add(self, event: OutboxEvent) -> OutboxEvent:
+        model = OutboxEventModel(
+            id=event.id,
+            event_type=event.event_type,
+            aggregate_type=event.aggregate_type,
+            aggregate_id=event.aggregate_id,
+            recipient_user_id=event.recipient_user_id,
+            payload=event.payload,
+            status=event.status,
+            attempt_count=event.attempt_count,
+            next_attempt_at=event.next_attempt_at,
+            last_error=event.last_error,
+            created_at=event.created_at,
+            updated_at=event.updated_at,
+        )
+        self.session.add(model)
+        await self._flush_or_raise_conflict("That outbox event could not be saved.")
+        return model.to_domain()
+
+    async def list_admin(
+        self,
+        status: OutboxEventStatus | None = None,
+        event_type: str | None = None,
+    ) -> list[OutboxEvent]:
+        statement: Select[tuple[OutboxEventModel]] = select(OutboxEventModel).order_by(
+            OutboxEventModel.created_at.desc()
+        )
+        if status is not None:
+            statement = statement.where(OutboxEventModel.status == status)
+        if event_type is not None:
+            statement = statement.where(OutboxEventModel.event_type == event_type)
+        result = await self.session.execute(statement)
+        return [model.to_domain() for model in result.scalars().all()]

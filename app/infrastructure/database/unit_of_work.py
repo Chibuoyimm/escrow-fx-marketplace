@@ -12,6 +12,7 @@ from app.repositories.protocols import (
     CurrencyRepositoryProtocol,
     ExchangeOfferRepositoryProtocol,
     ExchangeRequestRepositoryProtocol,
+    OutboxEventRepositoryProtocol,
     TradeContractRepositoryProtocol,
     UserRepositoryProtocol,
 )
@@ -21,6 +22,7 @@ from app.repositories.sqlalchemy import (
     SqlAlchemyCurrencyRepository,
     SqlAlchemyExchangeOfferRepository,
     SqlAlchemyExchangeRequestRepository,
+    SqlAlchemyOutboxEventRepository,
     SqlAlchemyTradeContractRepository,
     SqlAlchemyUserRepository,
 )
@@ -36,6 +38,7 @@ class AbstractUnitOfWork(ABC):
     exchange_requests: ExchangeRequestRepositoryProtocol
     exchange_offers: ExchangeOfferRepositoryProtocol
     trade_contracts: TradeContractRepositoryProtocol
+    outbox_events: OutboxEventRepositoryProtocol
 
     @abstractmethod
     async def __aenter__(self) -> AbstractUnitOfWork:
@@ -70,6 +73,7 @@ class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
         self.exchange_requests = SqlAlchemyExchangeRequestRepository(self.session)
         self.exchange_offers = SqlAlchemyExchangeOfferRepository(self.session)
         self.trade_contracts = SqlAlchemyTradeContractRepository(self.session)
+        self.outbox_events = SqlAlchemyOutboxEventRepository(self.session)
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:

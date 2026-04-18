@@ -95,3 +95,12 @@ class TradeContractStatus(StrEnum):
     EXPIRED_REFUNDING = "expired_refunding"
     CANCELLED = "cancelled"
     DISPUTED = "disputed"
+
+
+class OutboxEventStatus(StrEnum):
+    """Delivery lifecycle states for outbox events."""
+
+    PENDING = "pending"
+    PROCESSING = "processing"
+    DELIVERED = "delivered"
+    FAILED = "failed"

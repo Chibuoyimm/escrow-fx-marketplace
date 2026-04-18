@@ -5,12 +5,14 @@ from __future__ import annotations
 from app.domain.entities import (
     ExchangeOfferDetails,
     ExchangeRequestDetails,
+    OutboxEvent,
     TradeContractDetails,
     User,
 )
 from app.domain.enums import (
     ExchangeOfferStatus,
     ExchangeRequestStatus,
+    OutboxEventStatus,
     TradeContractStatus,
     UserStatus,
 )
@@ -51,6 +53,16 @@ class AdminService:
         """List trade contracts for admin inspection."""
         async with self._uow_factory() as uow:
             return await uow.trade_contracts.list_admin_details(status)
+
+    async def list_events(
+        self,
+        *,
+        status: OutboxEventStatus | None = None,
+        event_type: str | None = None,
+    ) -> list[OutboxEvent]:
+        """List outbox events for admin inspection."""
+        async with self._uow_factory() as uow:
+            return await uow.outbox_events.list_admin(status, event_type)
 
 
 def get_admin_service() -> AdminService:

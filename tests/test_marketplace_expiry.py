@@ -134,12 +134,20 @@ async def test_marketplace_expiry_transitions_due_items(
         pending_request = await uow.exchange_requests.get(seeded["pending_request_id"])
         expired_offer = await uow.exchange_offers.get(seeded["expired_offer_id"])
         due_trade = await uow.trade_contracts.get(seeded["due_trade_id"])
+        events = await uow.outbox_events.list_admin(event_type="marketplace_expiry.completed")
 
     assert expired_request.status is ExchangeRequestStatus.EXPIRED
     assert offer_on_expired_request.status is ExchangeOfferStatus.EXPIRED
     assert pending_request.status is ExchangeRequestStatus.REQUEST_OPEN
     assert expired_offer.status is ExchangeOfferStatus.EXPIRED
     assert due_trade.status is TradeContractStatus.CANCELLED
+    assert len(events) == 1
+    assert events[0].payload == {
+        "expired_requests": 1,
+        "expired_offers": 2,
+        "reopened_requests": 1,
+        "cancelled_trades": 1,
+    }
 
 
 async def test_marketplace_expiry_is_idempotent(

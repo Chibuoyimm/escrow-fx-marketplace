@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from uuid import UUID
 
 from app.services._shared import UnitOfWorkFactory, build_uow, utc_now
+from app.services.outbox import build_outbox_event
+
+SYSTEM_AGGREGATE_ID = UUID("00000000-0000-0000-0000-000000000000")
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +38,20 @@ class MarketplaceExpiryService:
                 current_time
             )
             cancelled_trades = await uow.trade_contracts.cancel_due_unfunded(current_time)
+            await uow.outbox_events.add(
+                build_outbox_event(
+                    event_type="marketplace_expiry.completed",
+                    aggregate_type="marketplace_expiry",
+                    aggregate_id=SYSTEM_AGGREGATE_ID,
+                    recipient_user_id=None,
+                    payload={
+                        "expired_requests": expired_requests,
+                        "expired_offers": expired_offers,
+                        "reopened_requests": reopened_requests,
+                        "cancelled_trades": cancelled_trades,
+                    },
+                )
+            )
             await uow.commit()
 
         return MarketplaceExpiryResult(

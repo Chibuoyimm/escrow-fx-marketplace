@@ -220,10 +220,21 @@ async def test_accept_offer_locks_trade_and_rejects_competing_offers(
         exchange_request = await uow.exchange_requests.get(seeded["request_id"])
         accepted_offer = await uow.exchange_offers.get(seeded["offer_id"])
         competing_offer = await uow.exchange_offers.get(seeded["competing_offer_id"])
+        locked_events = await uow.outbox_events.list_admin(event_type="trade_contract.locked")
+        accepted_events = await uow.outbox_events.list_admin(event_type="exchange_offer.accepted")
+        rejected_events = await uow.outbox_events.list_admin(event_type="exchange_offer.rejected")
 
         assert exchange_request.status is ExchangeRequestStatus.TERMS_LOCKED
         assert accepted_offer.status is ExchangeOfferStatus.ACCEPTED
         assert competing_offer.status is ExchangeOfferStatus.REJECTED
+        assert {event.recipient_user_id for event in locked_events} == {
+            seeded["requester_id"],
+            seeded["counterparty_id"],
+        }
+        assert [event.aggregate_id for event in accepted_events] == [seeded["offer_id"]]
+        assert [event.aggregate_id for event in rejected_events] == [
+            seeded["competing_offer_id"]
+        ]
 
 
 async def test_accept_offer_requires_request_creator(

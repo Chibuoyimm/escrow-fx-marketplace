@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from app.domain.enums import (
@@ -14,6 +15,7 @@ from app.domain.enums import (
     ExchangeRequestStatus,
     FlowType,
     KycStatus,
+    OutboxEventStatus,
     RailStatus,
     RiskLevel,
     TradeContractStatus,
@@ -202,5 +204,23 @@ class TradeContractDetails:
     to_amount: Decimal
     funding_deadline_at: datetime
     status: TradeContractStatus
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class OutboxEvent:
+    """A durable event queued for later notification dispatch."""
+
+    id: UUID
+    event_type: str
+    aggregate_type: str
+    aggregate_id: UUID
+    recipient_user_id: UUID | None
+    payload: dict[str, Any]
+    status: OutboxEventStatus
+    attempt_count: int
+    next_attempt_at: datetime | None
+    last_error: str | None
     created_at: datetime
     updated_at: datetime

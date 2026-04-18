@@ -179,6 +179,14 @@ async def test_create_exchange_request_succeeds_for_verified_user(
         expected = expected.replace(tzinfo=None)
     assert abs((expires_at - expected).total_seconds()) < 10
 
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        events = await uow.outbox_events.list_admin(event_type="exchange_request.created")
+
+    assert len(events) == 1
+    assert events[0].aggregate_id == UUID(body["id"])
+    assert events[0].recipient_user_id == user_id
+    assert events[0].payload["from_currency_code"] == "USD"
+
 
 async def test_create_exchange_request_requires_authentication(client: AsyncClient) -> None:
     response = await client.post(

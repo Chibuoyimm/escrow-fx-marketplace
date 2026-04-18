@@ -13,6 +13,7 @@ from app.domain.enums import (
     CurrencyStatus,
     ExchangeOfferStatus,
     ExchangeRequestStatus,
+    OutboxEventStatus,
     RailStatus,
     TradeContractStatus,
 )
@@ -29,9 +30,11 @@ from app.repositories.sqlalchemy import (
     SqlAlchemyCurrencyRepository,
     SqlAlchemyExchangeOfferRepository,
     SqlAlchemyExchangeRequestRepository,
+    SqlAlchemyOutboxEventRepository,
     SqlAlchemyTradeContractRepository,
     SqlAlchemyUserRepository,
 )
+from app.services.outbox import build_outbox_event
 from tests.conftest import (
     build_corridor,
     build_corridor_rail,
@@ -371,6 +374,39 @@ async def test_trade_contract_repository_is_visible_only_to_participants(
 
     with pytest.raises(NotFoundError):
         await trade_contract_repository.get_for_participant(trade_contract.id, outsider.id)
+
+
+@pytest.mark.anyio
+async def test_outbox_event_repository_adds_and_filters_events(session: AsyncSession) -> None:
+    repository = SqlAlchemyOutboxEventRepository(session)
+    request_id = uuid4()
+    trade_id = uuid4()
+
+    request_event = await repository.add(
+        build_outbox_event(
+            event_type="exchange_request.created",
+            aggregate_type="exchange_request",
+            aggregate_id=request_id,
+            recipient_user_id=uuid4(),
+            payload={"request_id": str(request_id)},
+        )
+    )
+    await repository.add(
+        build_outbox_event(
+            event_type="trade_contract.locked",
+            aggregate_type="trade_contract",
+            aggregate_id=trade_id,
+            recipient_user_id=uuid4(),
+            payload={"trade_contract_id": str(trade_id)},
+        )
+    )
+
+    pending_events = await repository.list_admin(status=OutboxEventStatus.PENDING)
+    request_events = await repository.list_admin(event_type="exchange_request.created")
+
+    assert len(pending_events) == 2
+    assert [event.id for event in request_events] == [request_event.id]
+    assert request_events[0].payload == {"request_id": str(request_id)}
 
 
 @pytest.mark.anyio

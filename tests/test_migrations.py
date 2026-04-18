@@ -34,6 +34,7 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     }
     exchange_offer_columns = {column["name"] for column in inspector.get_columns("exchange_offers")}
     trade_contract_columns = {column["name"] for column in inspector.get_columns("trade_contracts")}
+    outbox_event_columns = {column["name"] for column in inspector.get_columns("outbox_events")}
 
     assert "users" in inspector.get_table_names()
     assert "currencies" in inspector.get_table_names()
@@ -42,7 +43,10 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     assert "exchange_requests" in inspector.get_table_names()
     assert "exchange_offers" in inspector.get_table_names()
     assert "trade_contracts" in inspector.get_table_names()
+    assert "outbox_events" in inspector.get_table_names()
     assert "password_hash" in user_columns
     assert "expires_at" in exchange_request_columns
     assert "offered_rate" in exchange_offer_columns
     assert "accepted_offer_id" in trade_contract_columns
+    assert "event_type" in outbox_event_columns
+    assert "payload" in outbox_event_columns

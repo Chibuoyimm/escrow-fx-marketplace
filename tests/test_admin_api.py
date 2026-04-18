@@ -3,15 +3,18 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.domain.enums import (
     CurrencyStatus,
     ExchangeOfferStatus,
     ExchangeRequestStatus,
+    OutboxEventStatus,
     TradeContractStatus,
     UserRole,
     UserStatus,
@@ -19,8 +22,10 @@ from app.domain.enums import (
 from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.security import SecurityService
 from app.main import app
+from app.models.outbox_event import OutboxEventModel
 from app.services.admin import AdminService, get_admin_service
 from app.services.auth import AuthService, get_auth_service
+from app.services.outbox import build_outbox_event
 from tests.conftest import (
     build_currency,
     build_exchange_offer,
@@ -273,3 +278,70 @@ async def test_admin_lists_marketplace_records_with_status_filters(
     assert [trade["id"] for trade in cancelled_trades_response.json()] == [
         seeded["cancelled_trade_id"]
     ]
+
+
+async def test_admin_lists_outbox_events_with_filters(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    admin_headers, _ = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="event-admin@example.com",
+        role=UserRole.ADMIN,
+    )
+    seeded = await seed_admin_marketplace_data(session_factory)
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        pending_event = await uow.outbox_events.add(
+            build_outbox_event(
+                event_type="exchange_offer.created",
+                aggregate_type="exchange_offer",
+                aggregate_id=UUID(seeded["active_offer_id"]),
+                recipient_user_id=None,
+                payload={"offer_id": seeded["active_offer_id"]},
+            )
+        )
+        failed_event = await uow.outbox_events.add(
+            build_outbox_event(
+                event_type="trade_contract.locked",
+                aggregate_type="trade_contract",
+                aggregate_id=UUID(seeded["trade_id"]),
+                recipient_user_id=None,
+                payload={"trade_contract_id": seeded["trade_id"]},
+            )
+        )
+        failed_event = replace(
+            failed_event,
+            status=OutboxEventStatus.FAILED,
+            last_error="provider timeout",
+        )
+        assert uow.session is not None
+        await uow.session.execute(
+            update(OutboxEventModel)
+            .where(OutboxEventModel.id == failed_event.id)
+            .values(status=failed_event.status, last_error=failed_event.last_error)
+        )
+        await uow.commit()
+
+    all_response = await client.get("/api/v1/admin/events", headers=admin_headers)
+    pending_response = await client.get(
+        "/api/v1/admin/events?status=pending",
+        headers=admin_headers,
+    )
+    type_response = await client.get(
+        "/api/v1/admin/events?event_type=trade_contract.locked",
+        headers=admin_headers,
+    )
+
+    assert all_response.status_code == 200
+    assert {event["id"] for event in all_response.json()} == {
+        str(pending_event.id),
+        str(failed_event.id),
+    }
+    assert pending_response.status_code == 200
+    assert [event["id"] for event in pending_response.json()] == [str(pending_event.id)]
+    assert type_response.status_code == 200
+    assert [event["id"] for event in type_response.json()] == [str(failed_event.id)]
+    assert type_response.json()[0]["last_error"] == "provider timeout"

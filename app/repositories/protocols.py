@@ -15,6 +15,7 @@ from app.domain.entities import (
     ExchangeOfferDetails,
     ExchangeRequest,
     ExchangeRequestDetails,
+    OutboxEvent,
     TradeContract,
     TradeContractDetails,
     User,
@@ -22,6 +23,7 @@ from app.domain.entities import (
 from app.domain.enums import (
     ExchangeOfferStatus,
     ExchangeRequestStatus,
+    OutboxEventStatus,
     TradeContractStatus,
     UserStatus,
 )
@@ -230,3 +232,19 @@ class TradeContractRepositoryProtocol(ABC):
     @abstractmethod
     async def cancel_due_unfunded(self, now: datetime) -> int:
         """Cancel terms-locked trades whose funding deadline has passed."""
+
+
+class OutboxEventRepositoryProtocol(ABC):
+    """Outbox event repository contract."""
+
+    @abstractmethod
+    async def add(self, event: OutboxEvent) -> OutboxEvent:
+        """Persist an outbox event."""
+
+    @abstractmethod
+    async def list_admin(
+        self,
+        status: OutboxEventStatus | None = None,
+        event_type: str | None = None,
+    ) -> list[OutboxEvent]:
+        """List outbox events for admin inspection."""
