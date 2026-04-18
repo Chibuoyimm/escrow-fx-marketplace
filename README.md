@@ -66,6 +66,14 @@ If you want to inspect the database logs:
 make db-logs
 ```
 
+To wipe the local Docker database and rebuild it from migrations plus seed data:
+
+```bash
+make db-reset
+```
+
+`make db-down` only stops the container. It does not delete the database volume.
+
 ## Quality Gates
 
 - `ruff` for linting and formatting
@@ -104,6 +112,18 @@ Expire due marketplace records with:
 make expire-marketplace
 ```
 
+The expiry command updates stale marketplace state and records outbox events for
+affected users. It also records a summary `marketplace_expiry.completed` event
+for operational inspection.
+
+Admin and operations users can inspect pending notification/outbox events with:
+
+```bash
+GET /api/v1/admin/events
+GET /api/v1/admin/events?status=pending
+GET /api/v1/admin/events?event_type=trade_contract.cancelled
+```
+
 ## Run
 
 ```bash
@@ -117,5 +137,6 @@ source .venv/bin/activate
 cp .env.example .env
 make db-up
 make migrate
+make seed-reference-data
 make run
 ```

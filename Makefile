@@ -1,4 +1,4 @@
-.PHONY: format lint typecheck test db-up db-down db-logs migrate run seed-reference-data expire-marketplace
+.PHONY: format lint typecheck test db-up db-down db-reset db-logs migrate run seed-reference-data expire-marketplace
 
 format:
 	.venv/bin/ruff format .
@@ -17,6 +17,12 @@ db-up:
 
 db-down:
 	docker compose down
+
+db-reset:
+	docker compose down -v
+	docker compose up -d postgres
+	.venv/bin/alembic upgrade head
+	.venv/bin/python -m app.seed_reference_data
 
 db-logs:
 	docker compose logs -f postgres
