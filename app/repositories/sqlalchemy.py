@@ -32,6 +32,7 @@ from app.domain.enums import (
     ExchangeRequestStatus,
     RailStatus,
     TradeContractStatus,
+    UserStatus,
 )
 from app.domain.exceptions import ConflictError, NotFoundError
 from app.infrastructure.exceptions import InfrastructureError
@@ -124,6 +125,15 @@ class SqlAlchemyUserRepository(SqlAlchemyRepository, UserRepositoryProtocol):
 
         await self._flush_or_raise_conflict("A user with that email already exists.")
         return model.to_domain()
+
+    async def list_all(self, status: UserStatus | None = None) -> list[User]:
+        statement: Select[tuple[UserModel]] = select(UserModel).order_by(
+            UserModel.created_at.desc()
+        )
+        if status is not None:
+            statement = statement.where(UserModel.status == status)
+        result = await self.session.execute(statement)
+        return [model.to_domain() for model in result.scalars().all()]
 
 
 class SqlAlchemyCurrencyRepository(SqlAlchemyRepository, CurrencyRepositoryProtocol):
@@ -437,6 +447,20 @@ class SqlAlchemyExchangeRequestRepository(SqlAlchemyRepository, ExchangeRequestR
             raise NotFoundError(f"Exchange request '{request_id}' was not found.")
         return model.to_details()
 
+    async def list_admin_details(
+        self,
+        status: ExchangeRequestStatus | None = None,
+    ) -> list[ExchangeRequestDetails]:
+        statement: Select[tuple[ExchangeRequestModel]] = (
+            select(ExchangeRequestModel)
+            .options(*self._details_load_options())
+            .order_by(ExchangeRequestModel.created_at.desc())
+        )
+        if status is not None:
+            statement = statement.where(ExchangeRequestModel.status == status)
+        result = await self.session.execute(statement)
+        return [model.to_details() for model in result.unique().scalars().all()]
+
     async def expire_due(self, now: datetime) -> int:
         result = await self.session.execute(
             update(ExchangeRequestModel)
@@ -526,6 +550,18 @@ class SqlAlchemyExchangeOfferRepository(SqlAlchemyRepository, ExchangeOfferRepos
         result = await self.session.execute(statement)
         return result.scalar_one_or_none() is not None
 
+    async def list_admin_details(
+        self,
+        status: ExchangeOfferStatus | None = None,
+    ) -> list[ExchangeOfferDetails]:
+        statement: Select[tuple[ExchangeOfferModel]] = select(ExchangeOfferModel).order_by(
+            ExchangeOfferModel.created_at.desc()
+        )
+        if status is not None:
+            statement = statement.where(ExchangeOfferModel.status == status)
+        result = await self.session.execute(statement)
+        return [model.to_details() for model in result.scalars().all()]
+
     async def expire_due(self, now: datetime) -> int:
         result = await self.session.execute(
             update(ExchangeOfferModel)
@@ -612,6 +648,20 @@ class SqlAlchemyTradeContractRepository(SqlAlchemyRepository, TradeContractRepos
             )
             .order_by(TradeContractModel.created_at.desc())
         )
+        result = await self.session.execute(statement)
+        return [model.to_details() for model in result.unique().scalars().all()]
+
+    async def list_admin_details(
+        self,
+        status: TradeContractStatus | None = None,
+    ) -> list[TradeContractDetails]:
+        statement: Select[tuple[TradeContractModel]] = (
+            select(TradeContractModel)
+            .options(*self._details_load_options())
+            .order_by(TradeContractModel.created_at.desc())
+        )
+        if status is not None:
+            statement = statement.where(TradeContractModel.status == status)
         result = await self.session.execute(statement)
         return [model.to_details() for model in result.unique().scalars().all()]
 

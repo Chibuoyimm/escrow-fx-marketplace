@@ -19,6 +19,12 @@ from app.domain.entities import (
     TradeContractDetails,
     User,
 )
+from app.domain.enums import (
+    ExchangeOfferStatus,
+    ExchangeRequestStatus,
+    TradeContractStatus,
+    UserStatus,
+)
 
 
 class UserRepositoryProtocol(ABC):
@@ -39,6 +45,10 @@ class UserRepositoryProtocol(ABC):
     @abstractmethod
     async def update(self, user: User) -> User:
         """Persist changes to an existing user."""
+
+    @abstractmethod
+    async def list_all(self, status: UserStatus | None = None) -> list[User]:
+        """List users, optionally filtered by status."""
 
 
 class CurrencyRepositoryProtocol(ABC):
@@ -137,6 +147,13 @@ class ExchangeRequestRepositoryProtocol(ABC):
         """Fetch an exchange request read model visible to a viewer."""
 
     @abstractmethod
+    async def list_admin_details(
+        self,
+        status: ExchangeRequestStatus | None = None,
+    ) -> list[ExchangeRequestDetails]:
+        """List exchange request read models for admin inspection."""
+
+    @abstractmethod
     async def expire_due(self, now: datetime) -> int:
         """Expire open or pending exchange requests whose deadline has passed."""
 
@@ -173,6 +190,13 @@ class ExchangeOfferRepositoryProtocol(ABC):
         """Check whether a user already has an active offer on a request."""
 
     @abstractmethod
+    async def list_admin_details(
+        self,
+        status: ExchangeOfferStatus | None = None,
+    ) -> list[ExchangeOfferDetails]:
+        """List exchange offer read models for admin inspection."""
+
+    @abstractmethod
     async def expire_due(self, now: datetime) -> int:
         """Expire active exchange offers whose deadline or parent request has expired."""
 
@@ -195,6 +219,13 @@ class TradeContractRepositoryProtocol(ABC):
     @abstractmethod
     async def list_for_participant(self, user_id: UUID) -> list[TradeContractDetails]:
         """List trade contracts visible to a participant."""
+
+    @abstractmethod
+    async def list_admin_details(
+        self,
+        status: TradeContractStatus | None = None,
+    ) -> list[TradeContractDetails]:
+        """List trade contract read models for admin inspection."""
 
     @abstractmethod
     async def cancel_due_unfunded(self, now: datetime) -> int:
