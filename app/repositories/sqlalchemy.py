@@ -598,6 +598,23 @@ class SqlAlchemyTradeContractRepository(SqlAlchemyRepository, TradeContractRepos
             raise NotFoundError(f"Trade '{trade_id}' was not found.")
         return model.to_details()
 
+    async def list_for_participant(self, user_id: UUID) -> list[TradeContractDetails]:
+        statement: Select[tuple[TradeContractModel]] = (
+            select(TradeContractModel)
+            .options(*self._details_load_options())
+            .where(
+                or_(
+                    TradeContractModel.request.has(ExchangeRequestModel.creator_user_id == user_id),
+                    TradeContractModel.accepted_offer.has(
+                        ExchangeOfferModel.offer_user_id == user_id
+                    ),
+                ),
+            )
+            .order_by(TradeContractModel.created_at.desc())
+        )
+        result = await self.session.execute(statement)
+        return [model.to_details() for model in result.unique().scalars().all()]
+
     async def cancel_due_unfunded(self, now: datetime) -> int:
         result = await self.session.execute(
             update(TradeContractModel)

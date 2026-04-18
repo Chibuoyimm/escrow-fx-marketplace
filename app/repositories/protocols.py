@@ -193,5 +193,9 @@ class TradeContractRepositoryProtocol(ABC):
         """Fetch a trade contract visible to a participant."""
 
     @abstractmethod
+    async def list_for_participant(self, user_id: UUID) -> list[TradeContractDetails]:
+        """List trade contracts visible to a participant."""
+
+    @abstractmethod
     async def cancel_due_unfunded(self, now: datetime) -> int:
         """Cancel terms-locked trades whose funding deadline has passed."""

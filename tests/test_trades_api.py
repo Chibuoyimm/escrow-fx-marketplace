@@ -28,6 +28,7 @@ from tests.conftest import (
     build_currency,
     build_exchange_offer,
     build_exchange_request,
+    build_trade_contract,
     build_user,
 )
 
@@ -315,3 +316,129 @@ async def test_get_trade_is_visible_only_to_participants(
     assert counterparty_response.status_code == 200
     assert outsider_response.status_code == 404
     assert outsider_response.json()["error_code"] == "not_found"
+
+
+async def test_list_trades_returns_participant_trades_ordered_newest_first(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    requester_id, requester_headers = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="trade-list-requester@example.com",
+    )
+    now = datetime.now(UTC)
+    security = SecurityService()
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        first_counterparty = await uow.users.add(
+            build_user(
+                email="trade-list-first-counterparty@example.com",
+                password_hash=security.hash_password(PASSWORD),
+            )
+        )
+        second_counterparty = await uow.users.add(
+            build_user(
+                email="trade-list-second-counterparty@example.com",
+                password_hash=security.hash_password(PASSWORD),
+            )
+        )
+        outsider = await uow.users.add(
+            build_user(
+                email="trade-list-outsider@example.com",
+                password_hash=security.hash_password(PASSWORD),
+            )
+        )
+        usd = await uow.currencies.add(build_currency(code="USD", status=CurrencyStatus.ACTIVE))
+        ngn = await uow.currencies.add(build_currency(code="NGN", status=CurrencyStatus.ACTIVE))
+        gbp = await uow.currencies.add(build_currency(code="GBP", status=CurrencyStatus.ACTIVE))
+        eur = await uow.currencies.add(build_currency(code="EUR", status=CurrencyStatus.ACTIVE))
+
+        older_request = await uow.exchange_requests.add(
+            build_exchange_request(
+                creator_user_id=requester_id,
+                from_currency_id=usd.id,
+                to_currency_id=ngn.id,
+                status=ExchangeRequestStatus.TERMS_LOCKED,
+                created_at=now - timedelta(minutes=20),
+            )
+        )
+        older_offer = await uow.exchange_offers.add(
+            build_exchange_offer(
+                request_id=older_request.id,
+                offer_user_id=first_counterparty.id,
+                status=ExchangeOfferStatus.ACCEPTED,
+                created_at=now - timedelta(minutes=19),
+            )
+        )
+        older_trade = await uow.trade_contracts.add(
+            build_trade_contract(
+                request_id=older_request.id,
+                accepted_offer_id=older_offer.id,
+                created_at=now - timedelta(minutes=10),
+            )
+        )
+
+        newer_request = await uow.exchange_requests.add(
+            build_exchange_request(
+                creator_user_id=requester_id,
+                from_currency_id=gbp.id,
+                to_currency_id=eur.id,
+                status=ExchangeRequestStatus.TERMS_LOCKED,
+                created_at=now - timedelta(minutes=5),
+            )
+        )
+        newer_offer = await uow.exchange_offers.add(
+            build_exchange_offer(
+                request_id=newer_request.id,
+                offer_user_id=second_counterparty.id,
+                status=ExchangeOfferStatus.ACCEPTED,
+                created_at=now - timedelta(minutes=4),
+            )
+        )
+        newer_trade = await uow.trade_contracts.add(
+            build_trade_contract(
+                request_id=newer_request.id,
+                accepted_offer_id=newer_offer.id,
+                created_at=now - timedelta(minutes=3),
+            )
+        )
+
+        outsider_request = await uow.exchange_requests.add(
+            build_exchange_request(
+                creator_user_id=outsider.id,
+                from_currency_id=usd.id,
+                to_currency_id=ngn.id,
+                status=ExchangeRequestStatus.TERMS_LOCKED,
+            )
+        )
+        outsider_offer = await uow.exchange_offers.add(
+            build_exchange_offer(
+                request_id=outsider_request.id,
+                offer_user_id=first_counterparty.id,
+                status=ExchangeOfferStatus.ACCEPTED,
+            )
+        )
+        outsider_trade = await uow.trade_contracts.add(
+            build_trade_contract(
+                request_id=outsider_request.id,
+                accepted_offer_id=outsider_offer.id,
+            )
+        )
+        await uow.commit()
+
+    requester_response = await client.get("/api/v1/trades", headers=requester_headers)
+
+    assert requester_response.status_code == 200
+    assert [trade["id"] for trade in requester_response.json()] == [
+        str(newer_trade.id),
+        str(older_trade.id),
+    ]
+    assert str(outsider_trade.id) not in {trade["id"] for trade in requester_response.json()}
+
+
+async def test_list_trades_requires_authentication(client: AsyncClient) -> None:
+    response = await client.get("/api/v1/trades")
+
+    assert response.status_code == 401
+    assert response.json()["error_code"] == "authentication_error"

@@ -121,6 +121,14 @@ class TradeService:
         async with self._uow_factory() as uow:
             return await uow.trade_contracts.get_for_participant(trade_id, participant_user_id)
 
+    async def list_trades_for_participant(
+        self,
+        participant_user_id: UUID,
+    ) -> list[TradeContractDetails]:
+        """List trade contracts for one of their participants."""
+        async with self._uow_factory() as uow:
+            return await uow.trade_contracts.list_for_participant(participant_user_id)
+
 
 def get_trade_service() -> TradeService:
     """Build the default trade service."""
