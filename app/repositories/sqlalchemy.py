@@ -465,6 +465,14 @@ class SqlAlchemyExchangeRequestRepository(SqlAlchemyRepository, ExchangeRequestR
         result = await self.session.execute(statement)
         return [model.to_details() for model in result.unique().scalars().all()]
 
+    async def list_due_for_expiry(self, now: datetime) -> list[ExchangeRequest]:
+        statement: Select[tuple[ExchangeRequestModel]] = select(ExchangeRequestModel).where(
+            ExchangeRequestModel.status.in_(self._board_visible_statuses()),
+            ExchangeRequestModel.expires_at <= now,
+        )
+        result = await self.session.execute(statement)
+        return [model.to_domain() for model in result.scalars().all()]
+
     async def expire_due(self, now: datetime) -> int:
         result = await self.session.execute(
             update(ExchangeRequestModel)
@@ -475,6 +483,16 @@ class SqlAlchemyExchangeRequestRepository(SqlAlchemyRepository, ExchangeRequestR
             .values(status=ExchangeRequestStatus.EXPIRED, updated_at=now)
         )
         return self._rowcount(result)
+
+    async def list_pending_without_active_offers(self) -> list[ExchangeRequest]:
+        statement: Select[tuple[ExchangeRequestModel]] = select(ExchangeRequestModel).where(
+            ExchangeRequestModel.status == ExchangeRequestStatus.OFFER_PENDING,
+            ~ExchangeRequestModel.offers.any(
+                ExchangeOfferModel.status == ExchangeOfferStatus.ACTIVE
+            ),
+        )
+        result = await self.session.execute(statement)
+        return [model.to_domain() for model in result.scalars().all()]
 
     async def reopen_pending_without_active_offers(self, now: datetime) -> int:
         result = await self.session.execute(
@@ -565,6 +583,19 @@ class SqlAlchemyExchangeOfferRepository(SqlAlchemyRepository, ExchangeOfferRepos
             statement = statement.where(ExchangeOfferModel.status == status)
         result = await self.session.execute(statement)
         return [model.to_details() for model in result.scalars().all()]
+
+    async def list_due_for_expiry(self, now: datetime) -> list[ExchangeOffer]:
+        statement: Select[tuple[ExchangeOfferModel]] = select(ExchangeOfferModel).where(
+            ExchangeOfferModel.status == ExchangeOfferStatus.ACTIVE,
+            or_(
+                ExchangeOfferModel.expires_at <= now,
+                ExchangeOfferModel.request.has(
+                    ExchangeRequestModel.status == ExchangeRequestStatus.EXPIRED
+                ),
+            ),
+        )
+        result = await self.session.execute(statement)
+        return [model.to_domain() for model in result.scalars().all()]
 
     async def expire_due(self, now: datetime) -> int:
         result = await self.session.execute(
@@ -666,6 +697,18 @@ class SqlAlchemyTradeContractRepository(SqlAlchemyRepository, TradeContractRepos
         )
         if status is not None:
             statement = statement.where(TradeContractModel.status == status)
+        result = await self.session.execute(statement)
+        return [model.to_details() for model in result.unique().scalars().all()]
+
+    async def list_due_unfunded_details(self, now: datetime) -> list[TradeContractDetails]:
+        statement: Select[tuple[TradeContractModel]] = (
+            select(TradeContractModel)
+            .options(*self._details_load_options())
+            .where(
+                TradeContractModel.status == TradeContractStatus.TERMS_LOCKED,
+                TradeContractModel.funding_deadline_at <= now,
+            )
+        )
         result = await self.session.execute(statement)
         return [model.to_details() for model in result.unique().scalars().all()]
 

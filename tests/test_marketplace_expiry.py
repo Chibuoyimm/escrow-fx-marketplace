@@ -134,20 +134,52 @@ async def test_marketplace_expiry_transitions_due_items(
         pending_request = await uow.exchange_requests.get(seeded["pending_request_id"])
         expired_offer = await uow.exchange_offers.get(seeded["expired_offer_id"])
         due_trade = await uow.trade_contracts.get(seeded["due_trade_id"])
-        events = await uow.outbox_events.list_admin(event_type="marketplace_expiry.completed")
+        summary_events = await uow.outbox_events.list_admin(
+            event_type="marketplace_expiry.completed"
+        )
+        request_expired_events = await uow.outbox_events.list_admin(
+            event_type="exchange_request.expired"
+        )
+        offer_expired_events = await uow.outbox_events.list_admin(
+            event_type="exchange_offer.expired"
+        )
+        request_reopened_events = await uow.outbox_events.list_admin(
+            event_type="exchange_request.reopened"
+        )
+        trade_cancelled_events = await uow.outbox_events.list_admin(
+            event_type="trade_contract.cancelled"
+        )
 
     assert expired_request.status is ExchangeRequestStatus.EXPIRED
     assert offer_on_expired_request.status is ExchangeOfferStatus.EXPIRED
     assert pending_request.status is ExchangeRequestStatus.REQUEST_OPEN
     assert expired_offer.status is ExchangeOfferStatus.EXPIRED
     assert due_trade.status is TradeContractStatus.CANCELLED
-    assert len(events) == 1
-    assert events[0].payload == {
+    assert len(summary_events) == 1
+    assert summary_events[0].payload == {
         "expired_requests": 1,
         "expired_offers": 2,
         "reopened_requests": 1,
         "cancelled_trades": 1,
     }
+    assert [event.aggregate_id for event in request_expired_events] == [
+        seeded["expired_request_id"]
+    ]
+    assert {event.aggregate_id for event in offer_expired_events} == {
+        seeded["offer_on_expired_request_id"],
+        seeded["expired_offer_id"],
+    }
+    assert [event.aggregate_id for event in request_reopened_events] == [
+        seeded["pending_request_id"]
+    ]
+    assert [event.aggregate_id for event in trade_cancelled_events] == [
+        seeded["due_trade_id"],
+        seeded["due_trade_id"],
+    ]
+    assert all(event.recipient_user_id is not None for event in request_expired_events)
+    assert all(event.recipient_user_id is not None for event in offer_expired_events)
+    assert all(event.recipient_user_id is not None for event in request_reopened_events)
+    assert len({event.recipient_user_id for event in trade_cancelled_events}) == 2
 
 
 async def test_marketplace_expiry_is_idempotent(

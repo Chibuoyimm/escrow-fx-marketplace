@@ -156,8 +156,16 @@ class ExchangeRequestRepositoryProtocol(ABC):
         """List exchange request read models for admin inspection."""
 
     @abstractmethod
+    async def list_due_for_expiry(self, now: datetime) -> list[ExchangeRequest]:
+        """List open or pending exchange requests whose deadline has passed."""
+
+    @abstractmethod
     async def expire_due(self, now: datetime) -> int:
         """Expire open or pending exchange requests whose deadline has passed."""
+
+    @abstractmethod
+    async def list_pending_without_active_offers(self) -> list[ExchangeRequest]:
+        """List pending requests that no longer have active offers."""
 
     @abstractmethod
     async def reopen_pending_without_active_offers(self, now: datetime) -> int:
@@ -199,6 +207,10 @@ class ExchangeOfferRepositoryProtocol(ABC):
         """List exchange offer read models for admin inspection."""
 
     @abstractmethod
+    async def list_due_for_expiry(self, now: datetime) -> list[ExchangeOffer]:
+        """List active exchange offers whose deadline or parent request has expired."""
+
+    @abstractmethod
     async def expire_due(self, now: datetime) -> int:
         """Expire active exchange offers whose deadline or parent request has expired."""
 
@@ -228,6 +240,10 @@ class TradeContractRepositoryProtocol(ABC):
         status: TradeContractStatus | None = None,
     ) -> list[TradeContractDetails]:
         """List trade contract read models for admin inspection."""
+
+    @abstractmethod
+    async def list_due_unfunded_details(self, now: datetime) -> list[TradeContractDetails]:
+        """List unfunded locked trades whose funding deadline has passed."""
 
     @abstractmethod
     async def cancel_due_unfunded(self, now: datetime) -> int:
