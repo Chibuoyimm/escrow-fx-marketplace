@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import JSON, DateTime, Enum, String, Uuid
+from sqlalchemy import JSON, DateTime, Enum, ForeignKey, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.domain.entities import OutboxEvent
@@ -22,7 +22,11 @@ class OutboxEventModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     event_type: Mapped[str] = mapped_column(String(128), index=True)
     aggregate_type: Mapped[str] = mapped_column(String(64), index=True)
     aggregate_id: Mapped[UUID] = mapped_column(Uuid, index=True)
-    recipient_user_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True, index=True)
+    recipient_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
     status: Mapped[OutboxEventStatus] = mapped_column(
         Enum(OutboxEventStatus, native_enum=False, validate_strings=True),

@@ -30,6 +30,7 @@ def upgrade() -> None:
         sa.Column("last_error", sa.String(length=1000), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(["recipient_user_id"], ["users.id"], ondelete="RESTRICT"),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_outbox_events_event_type", "outbox_events", ["event_type"])
