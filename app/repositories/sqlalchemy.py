@@ -760,3 +760,78 @@ class SqlAlchemyOutboxEventRepository(SqlAlchemyRepository, OutboxEventRepositor
             statement = statement.where(OutboxEventModel.event_type == event_type)
         result = await self.session.execute(statement)
         return [model.to_domain() for model in result.scalars().all()]
+
+    async def claim_due_for_dispatch(
+        self,
+        *,
+        now: datetime,
+        processing_deadline: datetime,
+        limit: int,
+    ) -> list[OutboxEvent]:
+        statement: Select[tuple[OutboxEventModel]] = (
+            select(OutboxEventModel)
+            .where(
+                or_(
+                    and_(
+                        OutboxEventModel.status.in_(
+                            (OutboxEventStatus.PENDING, OutboxEventStatus.FAILED)
+                        ),
+                        or_(
+                            OutboxEventModel.next_attempt_at.is_(None),
+                            OutboxEventModel.next_attempt_at <= now,
+                        ),
+                    ),
+                    and_(
+                        OutboxEventModel.status == OutboxEventStatus.PROCESSING,
+                        OutboxEventModel.next_attempt_at <= now,
+                    ),
+                ),
+            )
+            .order_by(OutboxEventModel.created_at.asc())
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        result = await self.session.execute(statement)
+        models = result.scalars().all()
+        for model in models:
+            model.status = OutboxEventStatus.PROCESSING
+            model.next_attempt_at = processing_deadline
+            model.updated_at = now
+        await self._flush_or_raise_conflict("Due outbox events could not be claimed.")
+        return [model.to_domain() for model in models]
+
+    async def mark_delivered(self, event_id: UUID, now: datetime) -> OutboxEvent:
+        model = await self.session.get(OutboxEventModel, event_id)
+        if model is None:
+            raise NotFoundError(f"Outbox event '{event_id}' was not found.")
+
+        model.status = OutboxEventStatus.DELIVERED
+        model.next_attempt_at = None
+        model.last_error = None
+        model.updated_at = now
+
+        await self._flush_or_raise_conflict("That outbox event could not be updated.")
+        return model.to_domain()
+
+    async def mark_failed(
+        self,
+        *,
+        event_id: UUID,
+        status: OutboxEventStatus,
+        attempt_count: int,
+        last_error: str,
+        next_attempt_at: datetime | None,
+        now: datetime,
+    ) -> OutboxEvent:
+        model = await self.session.get(OutboxEventModel, event_id)
+        if model is None:
+            raise NotFoundError(f"Outbox event '{event_id}' was not found.")
+
+        model.status = status
+        model.attempt_count = attempt_count
+        model.last_error = last_error[:1000]
+        model.next_attempt_at = next_attempt_at
+        model.updated_at = now
+
+        await self._flush_or_raise_conflict("That outbox event could not be updated.")
+        return model.to_domain()

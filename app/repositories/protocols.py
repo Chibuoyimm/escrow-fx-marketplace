@@ -264,3 +264,30 @@ class OutboxEventRepositoryProtocol(ABC):
         event_type: str | None = None,
     ) -> list[OutboxEvent]:
         """List outbox events for admin inspection."""
+
+    @abstractmethod
+    async def claim_due_for_dispatch(
+        self,
+        *,
+        now: datetime,
+        processing_deadline: datetime,
+        limit: int,
+    ) -> list[OutboxEvent]:
+        """Claim due outbox events for dispatch."""
+
+    @abstractmethod
+    async def mark_delivered(self, event_id: UUID, now: datetime) -> OutboxEvent:
+        """Mark an outbox event as delivered."""
+
+    @abstractmethod
+    async def mark_failed(
+        self,
+        *,
+        event_id: UUID,
+        status: OutboxEventStatus,
+        attempt_count: int,
+        last_error: str,
+        next_attempt_at: datetime | None,
+        now: datetime,
+    ) -> OutboxEvent:
+        """Mark an outbox event as failed and scheduled for retry."""

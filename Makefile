@@ -1,4 +1,4 @@
-.PHONY: format lint typecheck test db-up db-down db-reset db-logs migrate run seed-reference-data expire-marketplace
+.PHONY: format lint typecheck test db-up db-down db-reset db-logs migrate run seed-reference-data expire-marketplace dispatch-notifications
 
 format:
 	.venv/bin/ruff format .
@@ -38,3 +38,6 @@ seed-reference-data:
 
 expire-marketplace:
 	.venv/bin/python -m app.expire_marketplace
+
+dispatch-notifications:
+	.venv/bin/python -m app.dispatch_notifications

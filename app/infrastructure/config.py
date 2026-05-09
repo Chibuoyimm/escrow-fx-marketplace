@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expiry_minutes: int = 60
     exchange_request_expiry_minutes: int = 1440
+    notification_dispatch_batch_size: int = 50
+    notification_processing_timeout_seconds: int = 300
+    notification_max_attempts: int = 5
+    notification_retry_base_seconds: int = 30
+    notification_retry_max_seconds: int = 3600
     jwt_issuer: str = "escrow-fx-marketplace"
 
     model_config = SettingsConfigDict(

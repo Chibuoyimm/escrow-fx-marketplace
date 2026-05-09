@@ -124,6 +124,19 @@ GET /api/v1/admin/events?status=pending
 GET /api/v1/admin/events?event_type=trade_contract.cancelled
 ```
 
+Dispatch pending notification/outbox events with:
+
+```bash
+make dispatch-notifications
+```
+
+The local dispatcher uses a development logging provider for now. It marks
+events as delivered on success and schedules failed events for retry with
+exponential backoff. Events that exhaust `APP_NOTIFICATION_MAX_ATTEMPTS` are
+marked `dead` for admin inspection instead of retrying forever. A real provider,
+such as Knock, can plug into the dispatcher without changing the marketplace
+services that record the events.
+
 ## Run
 
 ```bash

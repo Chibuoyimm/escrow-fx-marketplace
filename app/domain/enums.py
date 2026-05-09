@@ -104,3 +104,4 @@ class OutboxEventStatus(StrEnum):
     PROCESSING = "processing"
     DELIVERED = "delivered"
     FAILED = "failed"
+    DEAD = "dead"

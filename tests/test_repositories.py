@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -378,7 +378,9 @@ async def test_trade_contract_repository_is_visible_only_to_participants(
 
 @pytest.mark.anyio
 async def test_outbox_event_repository_adds_and_filters_events(session: AsyncSession) -> None:
+    user_repository = SqlAlchemyUserRepository(session)
     repository = SqlAlchemyOutboxEventRepository(session)
+    recipient = await user_repository.add(build_user(email="outbox-recipient@example.com"))
     request_id = uuid4()
     trade_id = uuid4()
 
@@ -387,7 +389,7 @@ async def test_outbox_event_repository_adds_and_filters_events(session: AsyncSes
             event_type="exchange_request.created",
             aggregate_type="exchange_request",
             aggregate_id=request_id,
-            recipient_user_id=uuid4(),
+            recipient_user_id=recipient.id,
             payload={"request_id": str(request_id)},
         )
     )
@@ -396,7 +398,7 @@ async def test_outbox_event_repository_adds_and_filters_events(session: AsyncSes
             event_type="trade_contract.locked",
             aggregate_type="trade_contract",
             aggregate_id=trade_id,
-            recipient_user_id=uuid4(),
+            recipient_user_id=recipient.id,
             payload={"trade_contract_id": str(trade_id)},
         )
     )
@@ -407,6 +409,55 @@ async def test_outbox_event_repository_adds_and_filters_events(session: AsyncSes
     assert len(pending_events) == 2
     assert [event.id for event in request_events] == [request_event.id]
     assert request_events[0].payload == {"request_id": str(request_id)}
+
+
+@pytest.mark.anyio
+async def test_outbox_event_repository_claims_and_updates_due_events(
+    session: AsyncSession,
+) -> None:
+    user_repository = SqlAlchemyUserRepository(session)
+    repository = SqlAlchemyOutboxEventRepository(session)
+    recipient = await user_repository.add(build_user(email="outbox-claim@example.com"))
+    due_event = await repository.add(
+        build_outbox_event(
+            event_type="exchange_request.created",
+            aggregate_type="exchange_request",
+            aggregate_id=uuid4(),
+            recipient_user_id=recipient.id,
+            payload={},
+        )
+    )
+    future_event = await repository.add(
+        build_outbox_event(
+            event_type="exchange_offer.created",
+            aggregate_type="exchange_offer",
+            aggregate_id=uuid4(),
+            recipient_user_id=recipient.id,
+            payload={},
+        )
+    )
+    current_time = datetime.now(UTC)
+    await repository.mark_failed(
+        event_id=future_event.id,
+        status=OutboxEventStatus.FAILED,
+        attempt_count=1,
+        last_error="provider unavailable",
+        next_attempt_at=current_time + timedelta(hours=1),
+        now=current_time,
+    )
+
+    claimed = await repository.claim_due_for_dispatch(
+        now=current_time,
+        processing_deadline=current_time + timedelta(minutes=5),
+        limit=10,
+    )
+    delivered = await repository.mark_delivered(due_event.id, current_time)
+
+    assert [event.id for event in claimed] == [due_event.id]
+    assert claimed[0].status is OutboxEventStatus.PROCESSING
+    assert claimed[0].next_attempt_at == current_time + timedelta(minutes=5)
+    assert delivered.status is OutboxEventStatus.DELIVERED
+    assert delivered.next_attempt_at is None
 
 
 @pytest.mark.anyio
