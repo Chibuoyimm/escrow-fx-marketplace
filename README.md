@@ -130,12 +130,24 @@ Dispatch pending notification/outbox events with:
 make dispatch-notifications
 ```
 
-The local dispatcher uses a development logging provider for now. It marks
-events as delivered on success and schedules failed events for retry with
-exponential backoff. Events that exhaust `APP_NOTIFICATION_MAX_ATTEMPTS` are
-marked `dead` for admin inspection instead of retrying forever. A real provider,
-such as Knock, can plug into the dispatcher without changing the marketplace
-services that record the events.
+The local dispatcher uses a development logging provider by default. To dispatch
+through Knock instead, set:
+
+```bash
+APP_NOTIFICATION_PROVIDER="knock"
+APP_KNOCK_API_KEY="sk_..."
+APP_KNOCK_BRANCH=""
+```
+
+Outbox event types are mapped to hyphenated Knock workflow keys. For example,
+`exchange_request.created` triggers `exchange-request-created`, and
+`trade_contract.locked` triggers `trade-contract-locked`.
+
+The dispatcher marks events as delivered on success and schedules failed events
+for retry with exponential backoff. Events that exhaust
+`APP_NOTIFICATION_MAX_ATTEMPTS` are marked `dead` for admin inspection instead of
+retrying forever. The Knock provider sends top-level uppercase rendering data
+such as `REQUEST_ID`, `OFFER_ID`, and `USER_NAME`.
 
 ## Run
 

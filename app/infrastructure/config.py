@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     notification_max_attempts: int = 5
     notification_retry_base_seconds: int = 30
     notification_retry_max_seconds: int = 3600
+    notification_provider: str = "logging"
+    notification_public_base_url: str = "http://localhost:8000"
+    knock_api_key: str | None = None
+    knock_branch: str | None = None
     jwt_issuer: str = "escrow-fx-marketplace"
 
     model_config = SettingsConfigDict(

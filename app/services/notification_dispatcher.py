@@ -55,7 +55,7 @@ class NotificationDispatchService:
         retry_max_seconds: int | None = None,
     ) -> None:
         self._uow_factory = uow_factory or build_uow
-        self._provider = provider or LoggingNotificationProvider()
+        self._provider = provider or build_notification_provider(self._uow_factory)
         self._batch_size: int = int(batch_size or settings.notification_dispatch_batch_size)
         self._processing_timeout_seconds: int = int(
             processing_timeout_seconds or settings.notification_processing_timeout_seconds
@@ -135,6 +135,20 @@ class NotificationDispatchService:
 def get_notification_dispatch_service() -> NotificationDispatchService:
     """Build the default notification dispatch service."""
     return NotificationDispatchService()
+
+
+def build_notification_provider(
+    uow_factory: UnitOfWorkFactory | None = None,
+) -> NotificationProvider:
+    """Build the configured notification provider."""
+    provider = settings.notification_provider.strip().lower()
+    if provider in {"logging", "log"}:
+        return LoggingNotificationProvider()
+    if provider == "knock":
+        from app.integrations.knock import KnockNotificationProvider
+
+        return KnockNotificationProvider(uow_factory=uow_factory)
+    raise RuntimeError(f"Unsupported notification provider '{settings.notification_provider}'.")
 
 
 NotificationDispatchServiceFactory = Callable[[], NotificationDispatchService]
