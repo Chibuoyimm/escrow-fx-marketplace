@@ -24,14 +24,19 @@ from app.domain.exceptions import (
 from app.domain.value_objects import Money, Rate
 from app.infrastructure.config import settings
 from app.services._shared import UnitOfWorkFactory, as_utc, build_uow, utc_now
-from app.services.outbox import build_outbox_event
+from app.services.outbox import OutboxEventPublisher
 
 
 class ExchangeRequestService:
     """Application service for exchange request creation and reads."""
 
-    def __init__(self, uow_factory: UnitOfWorkFactory | None = None) -> None:
+    def __init__(
+        self,
+        uow_factory: UnitOfWorkFactory | None = None,
+        outbox_publisher: OutboxEventPublisher | None = None,
+    ) -> None:
         self._uow_factory = uow_factory or build_uow
+        self._outbox = outbox_publisher or OutboxEventPublisher()
 
     async def create_request(
         self,
@@ -112,20 +117,13 @@ class ExchangeRequestService:
                     updated_at=current_time,
                 )
             )
-            await uow.outbox_events.add(
-                build_outbox_event(
-                    event_type="exchange_request.created",
-                    aggregate_type="exchange_request",
-                    aggregate_id=created.id,
-                    recipient_user_id=user.id,
-                    payload={
-                        "request_id": str(created.id),
-                        "creator_user_id": str(user.id),
-                        "from_currency_code": normalized_from,
-                        "to_currency_code": normalized_to,
-                        "from_amount": str(created.from_amount),
-                    },
-                )
+            await self._outbox.exchange_request_created(
+                uow,
+                request_id=created.id,
+                creator_user_id=user.id,
+                from_currency_code=normalized_from,
+                to_currency_code=normalized_to,
+                from_amount=str(created.from_amount),
             )
             await uow.commit()
             return await uow.exchange_requests.get_details_for_user(created.id, user.id)
@@ -179,17 +177,10 @@ class ExchangeRequestService:
             )
 
             offers = await uow.exchange_offers.list_for_request(exchange_request.id)
-            await uow.outbox_events.add(
-                build_outbox_event(
-                    event_type="exchange_request.cancelled",
-                    aggregate_type="exchange_request",
-                    aggregate_id=exchange_request.id,
-                    recipient_user_id=requester_user_id,
-                    payload={
-                        "request_id": str(exchange_request.id),
-                        "requester_user_id": str(requester_user_id),
-                    },
-                )
+            await self._outbox.exchange_request_cancelled(
+                uow,
+                request_id=exchange_request.id,
+                requester_user_id=requester_user_id,
             )
             for offer in offers:
                 if offer.status is not ExchangeOfferStatus.ACTIVE:
@@ -201,18 +192,12 @@ class ExchangeRequestService:
                         updated_at=current_time,
                     )
                 )
-                await uow.outbox_events.add(
-                    build_outbox_event(
-                        event_type="exchange_offer.rejected",
-                        aggregate_type="exchange_offer",
-                        aggregate_id=offer.id,
-                        recipient_user_id=offer.offer_user_id,
-                        payload={
-                            "offer_id": str(offer.id),
-                            "request_id": str(exchange_request.id),
-                            "reason": "request_cancelled",
-                        },
-                    )
+                await self._outbox.exchange_offer_rejected(
+                    uow,
+                    offer_id=offer.id,
+                    request_id=exchange_request.id,
+                    recipient_user_id=offer.offer_user_id,
+                    reason="request_cancelled",
                 )
 
             await uow.commit()

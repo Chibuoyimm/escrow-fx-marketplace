@@ -17,14 +17,19 @@ from app.domain.exceptions import (
 )
 from app.domain.value_objects import Rate
 from app.services._shared import UnitOfWorkFactory, as_utc, build_uow, utc_now
-from app.services.outbox import build_outbox_event
+from app.services.outbox import OutboxEventPublisher
 
 
 class ExchangeOfferService:
     """Application service for marketplace offers."""
 
-    def __init__(self, uow_factory: UnitOfWorkFactory | None = None) -> None:
+    def __init__(
+        self,
+        uow_factory: UnitOfWorkFactory | None = None,
+        outbox_publisher: OutboxEventPublisher | None = None,
+    ) -> None:
         self._uow_factory = uow_factory or build_uow
+        self._outbox = outbox_publisher or OutboxEventPublisher()
 
     @staticmethod
     def _request_status_after_active_offer_change(
@@ -93,19 +98,13 @@ class ExchangeOfferService:
                     )
                 )
 
-            await uow.outbox_events.add(
-                build_outbox_event(
-                    event_type="exchange_offer.created",
-                    aggregate_type="exchange_offer",
-                    aggregate_id=created.id,
-                    recipient_user_id=exchange_request.creator_user_id,
-                    payload={
-                        "offer_id": str(created.id),
-                        "request_id": str(exchange_request.id),
-                        "offer_user_id": str(offer_user_id),
-                        "offered_rate": str(created.offered_rate),
-                    },
-                )
+            await self._outbox.exchange_offer_created(
+                uow,
+                offer_id=created.id,
+                request_id=exchange_request.id,
+                offer_user_id=offer_user_id,
+                recipient_user_id=exchange_request.creator_user_id,
+                offered_rate=str(created.offered_rate),
             )
             await uow.commit()
             offers = await uow.exchange_offers.list_details_for_request(request_id)
@@ -173,18 +172,12 @@ class ExchangeOfferService:
                     )
                 )
 
-            await uow.outbox_events.add(
-                build_outbox_event(
-                    event_type="exchange_offer.withdrawn",
-                    aggregate_type="exchange_offer",
-                    aggregate_id=offer.id,
-                    recipient_user_id=exchange_request.creator_user_id,
-                    payload={
-                        "offer_id": str(offer.id),
-                        "request_id": str(exchange_request.id),
-                        "offer_user_id": str(offer_user_id),
-                    },
-                )
+            await self._outbox.exchange_offer_withdrawn(
+                uow,
+                offer_id=offer.id,
+                request_id=exchange_request.id,
+                offer_user_id=offer_user_id,
+                recipient_user_id=exchange_request.creator_user_id,
             )
             await uow.commit()
             return updated_offer
@@ -238,18 +231,12 @@ class ExchangeOfferService:
                     )
                 )
 
-            await uow.outbox_events.add(
-                build_outbox_event(
-                    event_type="exchange_offer.rejected",
-                    aggregate_type="exchange_offer",
-                    aggregate_id=offer.id,
-                    recipient_user_id=offer.offer_user_id,
-                    payload={
-                        "offer_id": str(offer.id),
-                        "request_id": str(exchange_request.id),
-                        "requester_user_id": str(requester_user_id),
-                    },
-                )
+            await self._outbox.exchange_offer_rejected(
+                uow,
+                offer_id=offer.id,
+                request_id=exchange_request.id,
+                recipient_user_id=offer.offer_user_id,
+                requester_user_id=requester_user_id,
             )
             await uow.commit()
             return updated_offer

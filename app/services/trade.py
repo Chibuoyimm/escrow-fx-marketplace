@@ -15,14 +15,19 @@ from app.domain.enums import (
 )
 from app.domain.exceptions import AuthorizationError, InvariantViolationError, NotFoundError
 from app.services._shared import UnitOfWorkFactory, as_utc, build_uow, utc_now
-from app.services.outbox import build_outbox_event
+from app.services.outbox import OutboxEventPublisher
 
 
 class TradeService:
     """Application service for trade locking and participant reads."""
 
-    def __init__(self, uow_factory: UnitOfWorkFactory | None = None) -> None:
+    def __init__(
+        self,
+        uow_factory: UnitOfWorkFactory | None = None,
+        outbox_publisher: OutboxEventPublisher | None = None,
+    ) -> None:
         self._uow_factory = uow_factory or build_uow
+        self._outbox = outbox_publisher or OutboxEventPublisher()
 
     async def accept_offer(
         self,
@@ -107,47 +112,29 @@ class TradeService:
                     )
                 )
                 if new_status is ExchangeOfferStatus.ACCEPTED:
-                    await uow.outbox_events.add(
-                        build_outbox_event(
-                            event_type="exchange_offer.accepted",
-                            aggregate_type="exchange_offer",
-                            aggregate_id=existing_offer.id,
-                            recipient_user_id=existing_offer.offer_user_id,
-                            payload={
-                                "offer_id": str(existing_offer.id),
-                                "request_id": str(exchange_request.id),
-                                "trade_contract_id": str(trade_contract.id),
-                            },
-                        )
+                    await self._outbox.exchange_offer_accepted(
+                        uow,
+                        offer_id=existing_offer.id,
+                        request_id=exchange_request.id,
+                        offer_user_id=existing_offer.offer_user_id,
+                        trade_contract_id=trade_contract.id,
                     )
                 else:
-                    await uow.outbox_events.add(
-                        build_outbox_event(
-                            event_type="exchange_offer.rejected",
-                            aggregate_type="exchange_offer",
-                            aggregate_id=existing_offer.id,
-                            recipient_user_id=existing_offer.offer_user_id,
-                            payload={
-                                "offer_id": str(existing_offer.id),
-                                "request_id": str(exchange_request.id),
-                                "reason": "competing_offer_accepted",
-                            },
-                        )
+                    await self._outbox.exchange_offer_rejected(
+                        uow,
+                        offer_id=existing_offer.id,
+                        request_id=exchange_request.id,
+                        recipient_user_id=existing_offer.offer_user_id,
+                        reason="competing_offer_accepted",
                     )
 
             for recipient_user_id in (exchange_request.creator_user_id, offer.offer_user_id):
-                await uow.outbox_events.add(
-                    build_outbox_event(
-                        event_type="trade_contract.locked",
-                        aggregate_type="trade_contract",
-                        aggregate_id=trade_contract.id,
-                        recipient_user_id=recipient_user_id,
-                        payload={
-                            "trade_contract_id": str(trade_contract.id),
-                            "request_id": str(exchange_request.id),
-                            "accepted_offer_id": str(offer.id),
-                        },
-                    )
+                await self._outbox.trade_contract_locked(
+                    uow,
+                    trade_contract_id=trade_contract.id,
+                    request_id=exchange_request.id,
+                    accepted_offer_id=offer.id,
+                    recipient_user_id=recipient_user_id,
                 )
 
             await uow.commit()

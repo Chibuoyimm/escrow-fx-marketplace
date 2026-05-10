@@ -25,7 +25,7 @@ from app.infrastructure.database.unit_of_work import AbstractUnitOfWork
 from app.infrastructure.security import SecurityService
 from app.schemas.auth import AccessTokenResponse
 from app.services._shared import UnitOfWorkFactory, as_utc, build_uow, utc_now
-from app.services.outbox import build_outbox_event
+from app.services.outbox import OutboxEventPublisher
 
 AUTH_TOKEN_BYTES = 32
 EMAIL_VERIFICATION_FAILED_DETAIL = "Email verification link is invalid or expired."
@@ -82,9 +82,11 @@ class AuthService:
         self,
         uow_factory: UnitOfWorkFactory | None = None,
         security: SecurityService | None = None,
+        outbox_publisher: OutboxEventPublisher | None = None,
     ) -> None:
         self._uow_factory = uow_factory or build_uow
         self._security = security or SecurityService()
+        self._outbox = outbox_publisher or OutboxEventPublisher()
 
     def _frontend_token_url(self, base_url: str, token: str) -> str:
         """Build a frontend URL carrying a single-use token."""
@@ -140,20 +142,13 @@ class AuthService:
                 updated_at=current_time,
             )
         )
-        await uow.outbox_events.add(
-            build_outbox_event(
-                event_type="user.email_verification_requested",
-                aggregate_type="user",
-                aggregate_id=user.id,
-                recipient_user_id=user.id,
-                payload={
-                    "user_id": str(user.id),
-                    "email": user.email,
-                    "verify_email_url": self._verification_url(raw_token),
-                    "expires_at": expires_at.isoformat(),
-                    "expires_at_display": format_auth_datetime(expires_at),
-                },
-            )
+        await self._outbox.user_email_verification_requested(
+            uow,
+            user_id=user.id,
+            email=user.email,
+            verify_email_url=self._verification_url(raw_token),
+            expires_at=expires_at.isoformat(),
+            expires_at_display=format_auth_datetime(expires_at),
         )
 
     async def _queue_password_reset(self, uow: AbstractUnitOfWork, user: User) -> None:
@@ -171,20 +166,13 @@ class AuthService:
                 updated_at=current_time,
             )
         )
-        await uow.outbox_events.add(
-            build_outbox_event(
-                event_type="user.password_reset_requested",
-                aggregate_type="user",
-                aggregate_id=user.id,
-                recipient_user_id=user.id,
-                payload={
-                    "user_id": str(user.id),
-                    "email": user.email,
-                    "reset_password_url": self._password_reset_url(raw_token),
-                    "expires_at": expires_at.isoformat(),
-                    "expires_at_display": format_auth_datetime(expires_at),
-                },
-            )
+        await self._outbox.user_password_reset_requested(
+            uow,
+            user_id=user.id,
+            email=user.email,
+            reset_password_url=self._password_reset_url(raw_token),
+            expires_at=expires_at.isoformat(),
+            expires_at_display=format_auth_datetime(expires_at),
         )
 
     async def register_user(
@@ -351,19 +339,12 @@ class AuthService:
                 )
             )
             await uow.password_reset_tokens.mark_consumed(reset_token.id, current_time)
-            await uow.outbox_events.add(
-                build_outbox_event(
-                    event_type="user.password_reset_completed",
-                    aggregate_type="user",
-                    aggregate_id=user.id,
-                    recipient_user_id=user.id,
-                    payload={
-                        "user_id": str(user.id),
-                        "email": user.email,
-                        "completed_at": current_time.isoformat(),
-                        "completed_at_display": format_auth_datetime(current_time),
-                    },
-                )
+            await self._outbox.user_password_reset_completed(
+                uow,
+                user_id=user.id,
+                email=user.email,
+                completed_at=current_time.isoformat(),
+                completed_at_display=format_auth_datetime(current_time),
             )
             await uow.commit()
 
@@ -393,19 +374,12 @@ class AuthService:
                     updated_at=current_time,
                 )
             )
-            await uow.outbox_events.add(
-                build_outbox_event(
-                    event_type="user.password_changed",
-                    aggregate_type="user",
-                    aggregate_id=user.id,
-                    recipient_user_id=user.id,
-                    payload={
-                        "user_id": str(user.id),
-                        "email": user.email,
-                        "changed_at": current_time.isoformat(),
-                        "changed_at_display": format_auth_datetime(current_time),
-                    },
-                )
+            await self._outbox.user_password_changed(
+                uow,
+                user_id=user.id,
+                email=user.email,
+                changed_at=current_time.isoformat(),
+                changed_at_display=format_auth_datetime(current_time),
             )
             await uow.commit()
 
