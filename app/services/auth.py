@@ -6,11 +6,12 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from hashlib import sha256
 from secrets import token_urlsafe
+from typing import Protocol
 from urllib.parse import urlencode
 from uuid import UUID, uuid4
 
 from app.domain.auth import AuthenticatedPrincipal
-from app.domain.entities import EmailVerificationToken, User
+from app.domain.entities import EmailVerificationToken, PasswordResetToken, User
 from app.domain.enums import KycStatus, RiskLevel, UserRole, UserStatus
 from app.domain.exceptions import (
     AuthenticationError,
@@ -26,8 +27,28 @@ from app.schemas.auth import AccessTokenResponse
 from app.services._shared import UnitOfWorkFactory, as_utc, build_uow, utc_now
 from app.services.outbox import build_outbox_event
 
-EMAIL_VERIFICATION_TOKEN_BYTES = 32
+AUTH_TOKEN_BYTES = 32
 EMAIL_VERIFICATION_FAILED_DETAIL = "Email verification link is invalid or expired."
+PASSWORD_RESET_FAILED_DETAIL = "Password reset link is invalid or expired."
+
+
+class SingleUseToken(Protocol):
+    """Shared shape for auth tokens stored in persistence."""
+
+    @property
+    def id(self) -> UUID: ...
+
+    @property
+    def user_id(self) -> UUID: ...
+
+    @property
+    def token_hash(self) -> str: ...
+
+    @property
+    def expires_at(self) -> datetime: ...
+
+    @property
+    def consumed_at(self) -> datetime | None: ...
 
 
 def normalize_country_code(country: str) -> str:
@@ -38,14 +59,19 @@ def normalize_country_code(country: str) -> str:
     return normalized_country
 
 
-def hash_email_verification_token(token: str) -> str:
-    """Hash a raw email verification token for storage and lookup."""
+def normalize_email(email: str) -> str:
+    """Normalize an email address."""
+    return email.lower().strip()
+
+
+def hash_auth_token(token: str) -> str:
+    """Hash a raw auth token for storage and lookup."""
     return sha256(token.encode("utf-8")).hexdigest()
 
 
-def format_email_verification_expiry(expires_at: datetime) -> str:
-    """Format a verification expiry for customer-facing emails."""
-    formatted = as_utc(expires_at).strftime("%B %d, %Y at %I:%M %p UTC")
+def format_auth_datetime(value: datetime) -> str:
+    """Format an auth-related timestamp for customer-facing emails."""
+    formatted = as_utc(value).strftime("%B %d, %Y at %I:%M %p UTC")
     return formatted.replace(" 0", " ").replace(" at 0", " at ")
 
 
@@ -60,9 +86,16 @@ class AuthService:
         self._uow_factory = uow_factory or build_uow
         self._security = security or SecurityService()
 
-    def _verification_url(self, token: str) -> str:
-        base_url = settings.email_verification_frontend_url.rstrip("/")
+    def _frontend_token_url(self, base_url: str, token: str) -> str:
+        """Build a frontend URL carrying a single-use token."""
+        base_url = base_url.rstrip("/")
         return f"{base_url}?{urlencode({'token': token})}"
+
+    def _verification_url(self, token: str) -> str:
+        return self._frontend_token_url(settings.email_verification_frontend_url, token)
+
+    def _password_reset_url(self, token: str) -> str:
+        return self._frontend_token_url(settings.password_reset_frontend_url, token)
 
     def issue_access_token(self, user: User) -> AccessTokenResponse:
         """Issue an access token response for an authenticated user."""
@@ -72,17 +105,35 @@ class AuthService:
             expires_in_seconds=claims.exp - claims.iat,
         )
 
-    async def _queue_email_verification(self, uow: AbstractUnitOfWork, user: User) -> None:
-        raw_token = token_urlsafe(EMAIL_VERIFICATION_TOKEN_BYTES)
+    def _new_auth_token(self, expiry_minutes: int) -> tuple[str, datetime, datetime]:
+        """Create a fresh raw token with its timestamps."""
+        raw_token = token_urlsafe(AUTH_TOKEN_BYTES)
         current_time = utc_now()
-        expires_at = current_time + timedelta(
-            minutes=settings.email_verification_token_expiry_minutes
+        expires_at = current_time + timedelta(minutes=expiry_minutes)
+        return raw_token, current_time, expires_at
+
+    def _assert_token_usable(
+        self,
+        token: SingleUseToken,
+        *,
+        current_time: datetime,
+        failure_detail: str,
+    ) -> None:
+        """Validate that a stored single-use token can still be consumed."""
+        if token.consumed_at is not None:
+            raise PreconditionFailedError(failure_detail)
+        if as_utc(token.expires_at) <= current_time:
+            raise PreconditionFailedError(failure_detail)
+
+    async def _queue_email_verification(self, uow: AbstractUnitOfWork, user: User) -> None:
+        raw_token, current_time, expires_at = self._new_auth_token(
+            settings.email_verification_token_expiry_minutes
         )
         await uow.email_verification_tokens.add(
             EmailVerificationToken(
                 id=uuid4(),
                 user_id=user.id,
-                token_hash=hash_email_verification_token(raw_token),
+                token_hash=hash_auth_token(raw_token),
                 expires_at=expires_at,
                 consumed_at=None,
                 created_at=current_time,
@@ -100,7 +151,38 @@ class AuthService:
                     "email": user.email,
                     "verify_email_url": self._verification_url(raw_token),
                     "expires_at": expires_at.isoformat(),
-                    "expires_at_display": format_email_verification_expiry(expires_at),
+                    "expires_at_display": format_auth_datetime(expires_at),
+                },
+            )
+        )
+
+    async def _queue_password_reset(self, uow: AbstractUnitOfWork, user: User) -> None:
+        raw_token, current_time, expires_at = self._new_auth_token(
+            settings.password_reset_token_expiry_minutes
+        )
+        await uow.password_reset_tokens.add(
+            PasswordResetToken(
+                id=uuid4(),
+                user_id=user.id,
+                token_hash=hash_auth_token(raw_token),
+                expires_at=expires_at,
+                consumed_at=None,
+                created_at=current_time,
+                updated_at=current_time,
+            )
+        )
+        await uow.outbox_events.add(
+            build_outbox_event(
+                event_type="user.password_reset_requested",
+                aggregate_type="user",
+                aggregate_id=user.id,
+                recipient_user_id=user.id,
+                payload={
+                    "user_id": str(user.id),
+                    "email": user.email,
+                    "reset_password_url": self._password_reset_url(raw_token),
+                    "expires_at": expires_at.isoformat(),
+                    "expires_at_display": format_auth_datetime(expires_at),
                 },
             )
         )
@@ -114,7 +196,7 @@ class AuthService:
         phone: str | None,
     ) -> User:
         """Register a new customer user."""
-        normalized_email = email.lower().strip()
+        normalized_email = normalize_email(email)
         normalized_country = normalize_country_code(country)
         async with self._uow_factory() as uow:
             try:
@@ -146,7 +228,7 @@ class AuthService:
 
     async def login_user(self, *, email: str, password: str) -> AccessTokenResponse:
         """Authenticate a user and issue an access token."""
-        normalized_email = email.lower().strip()
+        normalized_email = normalize_email(email)
         async with self._uow_factory() as uow:
             try:
                 user = await uow.users.get_by_email(normalized_email)
@@ -184,15 +266,16 @@ class AuthService:
         async with self._uow_factory() as uow:
             try:
                 verification = await uow.email_verification_tokens.get_by_token_hash(
-                    hash_email_verification_token(token)
+                    hash_auth_token(token)
                 )
             except NotFoundError as exc:
                 raise PreconditionFailedError(EMAIL_VERIFICATION_FAILED_DETAIL) from exc
 
-            if verification.consumed_at is not None:
-                raise PreconditionFailedError(EMAIL_VERIFICATION_FAILED_DETAIL)
-            if as_utc(verification.expires_at) <= current_time:
-                raise PreconditionFailedError(EMAIL_VERIFICATION_FAILED_DETAIL)
+            self._assert_token_usable(
+                verification,
+                current_time=current_time,
+                failure_detail=EMAIL_VERIFICATION_FAILED_DETAIL,
+            )
 
             user = await uow.users.get(verification.user_id)
             saved = user
@@ -211,7 +294,7 @@ class AuthService:
 
     async def resend_email_verification(self, *, email: str) -> None:
         """Queue another verification email without revealing whether an account exists."""
-        normalized_email = email.lower().strip()
+        normalized_email = normalize_email(email)
         async with self._uow_factory() as uow:
             try:
                 user = await uow.users.get_by_email(normalized_email)
@@ -222,6 +305,66 @@ class AuthService:
                 return
 
             await self._queue_email_verification(uow, user)
+            await uow.commit()
+
+    async def forgot_password(self, *, email: str) -> None:
+        """Queue a password reset email without revealing whether an account exists."""
+        normalized_email = normalize_email(email)
+        async with self._uow_factory() as uow:
+            try:
+                user = await uow.users.get_by_email(normalized_email)
+            except NotFoundError:
+                return
+
+            if user.status is not UserStatus.ACTIVE:
+                return
+
+            await self._queue_password_reset(uow, user)
+            await uow.commit()
+
+    async def reset_password(self, *, token: str, password: str) -> None:
+        """Reset a user's password using a single-use token."""
+        current_time = utc_now()
+        async with self._uow_factory() as uow:
+            try:
+                reset_token = await uow.password_reset_tokens.get_by_token_hash(
+                    hash_auth_token(token)
+                )
+            except NotFoundError as exc:
+                raise PreconditionFailedError(PASSWORD_RESET_FAILED_DETAIL) from exc
+
+            self._assert_token_usable(
+                reset_token,
+                current_time=current_time,
+                failure_detail=PASSWORD_RESET_FAILED_DETAIL,
+            )
+
+            user = await uow.users.get(reset_token.user_id)
+            if user.status is not UserStatus.ACTIVE:
+                raise PreconditionFailedError(PASSWORD_RESET_FAILED_DETAIL)
+
+            await uow.users.update(
+                replace(
+                    user,
+                    password_hash=self._security.hash_password(password),
+                    updated_at=current_time,
+                )
+            )
+            await uow.password_reset_tokens.mark_consumed(reset_token.id, current_time)
+            await uow.outbox_events.add(
+                build_outbox_event(
+                    event_type="user.password_reset_completed",
+                    aggregate_type="user",
+                    aggregate_id=user.id,
+                    recipient_user_id=user.id,
+                    payload={
+                        "user_id": str(user.id),
+                        "email": user.email,
+                        "completed_at": current_time.isoformat(),
+                        "completed_at_display": format_auth_datetime(current_time),
+                    },
+                )
+            )
             await uow.commit()
 
     async def get_user_by_id(self, user_id: UUID) -> User:

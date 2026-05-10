@@ -6,11 +6,13 @@ from app.schemas.auth import (
     AccessTokenResponse,
     CurrentUserResponse,
     EmailVerificationResponse,
+    ForgotPasswordRequest,
     LoginRequest,
     MessageResponse,
     RegisterUserRequest,
     RegisterUserResponse,
     ResendEmailVerificationRequest,
+    ResetPasswordRequest,
     VerifyEmailRequest,
 )
 from app.services.auth import AuthService, get_auth_service
@@ -75,3 +77,29 @@ async def resend_email_verification(
     """Queue another verification email if the account still needs one."""
     await auth_service.resend_email_verification(email=str(payload.email))
     return MessageResponse(message="If that account needs verification, a new email was queued.")
+
+
+@auth_router.post(
+    "/forgot-password",
+    response_model=MessageResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def forgot_password(
+    payload: ForgotPasswordRequest,
+    auth_service: AuthService = auth_service_dependency,
+) -> MessageResponse:
+    """Queue a password reset email if the account is eligible."""
+    await auth_service.forgot_password(email=str(payload.email))
+    return MessageResponse(
+        message="If that account is eligible, a password reset email was queued."
+    )
+
+
+@auth_router.post("/reset-password", response_model=MessageResponse)
+async def reset_password(
+    payload: ResetPasswordRequest,
+    auth_service: AuthService = auth_service_dependency,
+) -> MessageResponse:
+    """Reset a user's password using a single-use token."""
+    await auth_service.reset_password(token=payload.token, password=payload.password)
+    return MessageResponse(message="Your password has been reset.")

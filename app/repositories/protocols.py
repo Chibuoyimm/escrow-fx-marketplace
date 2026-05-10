@@ -17,6 +17,7 @@ from app.domain.entities import (
     ExchangeRequest,
     ExchangeRequestDetails,
     OutboxEvent,
+    PasswordResetToken,
     TradeContract,
     TradeContractDetails,
     User,
@@ -68,6 +69,22 @@ class EmailVerificationTokenRepositoryProtocol(ABC):
     @abstractmethod
     async def mark_consumed(self, token_id: UUID, now: datetime) -> EmailVerificationToken:
         """Mark a token as consumed."""
+
+
+class PasswordResetTokenRepositoryProtocol(ABC):
+    """Password reset token repository contract."""
+
+    @abstractmethod
+    async def add(self, token: PasswordResetToken) -> PasswordResetToken:
+        """Persist a password reset token."""
+
+    @abstractmethod
+    async def get_by_token_hash(self, token_hash: str) -> PasswordResetToken:
+        """Fetch a password reset token by hashed token."""
+
+    @abstractmethod
+    async def mark_consumed(self, token_id: UUID, now: datetime) -> PasswordResetToken:
+        """Mark a password reset token as consumed."""
 
 
 class CurrencyRepositoryProtocol(ABC):

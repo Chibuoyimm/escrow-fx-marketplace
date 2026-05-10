@@ -24,8 +24,9 @@ from app.infrastructure.security import SecurityService
 from app.main import app
 from app.models.email_verification_token import EmailVerificationTokenModel
 from app.models.outbox_event import OutboxEventModel
+from app.models.password_reset_token import PasswordResetTokenModel
 from app.models.user import UserModel
-from app.services.auth import AuthService, get_auth_service, hash_email_verification_token
+from app.services.auth import AuthService, get_auth_service, hash_auth_token
 
 admin_role_dependency = Depends(require_roles(UserRole.ADMIN))
 pytestmark = pytest.mark.anyio
@@ -87,6 +88,32 @@ async def verification_token_for_email(
     assert event is not None
     verification_url = event.payload["verify_email_url"]
     token = parse_qs(urlparse(verification_url).query)["token"][0]
+    assert isinstance(token, str)
+    assert token
+    return token
+
+
+async def password_reset_token_for_email(
+    session_factory: async_sessionmaker[AsyncSession],
+    email: str,
+) -> str:
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        user = await uow.users.get_by_email(email)
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(OutboxEventModel)
+            .where(
+                OutboxEventModel.event_type == "user.password_reset_requested",
+                OutboxEventModel.recipient_user_id == user.id,
+            )
+            .order_by(OutboxEventModel.created_at.desc())
+        )
+        event = result.scalars().first()
+
+    assert event is not None
+    reset_url = event.payload["reset_password_url"]
+    token = parse_qs(urlparse(reset_url).query)["token"][0]
     assert isinstance(token, str)
     assert token
     return token
@@ -317,7 +344,7 @@ async def test_verify_email_rejects_expired_token(
     async with session_factory() as session:
         result = await session.execute(
             select(EmailVerificationTokenModel).where(
-                EmailVerificationTokenModel.token_hash == hash_email_verification_token(token)
+                EmailVerificationTokenModel.token_hash == hash_auth_token(token)
             )
         )
         token_row = result.scalar_one()
@@ -370,6 +397,139 @@ async def test_resend_email_verification_does_not_reveal_unknown_accounts(
     )
 
     assert response.status_code == 202
+
+
+async def test_forgot_password_queues_reset_for_known_active_user(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "forgot@example.com",
+            "password": "ChangeMe123!",
+            "country": "NG",
+            "phone": "+2348000000000",
+        },
+    )
+
+    response = await client.post(
+        "/api/v1/auth/forgot-password",
+        json={"email": "forgot@example.com"},
+    )
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(OutboxEventModel).where(
+                OutboxEventModel.event_type == "user.password_reset_requested"
+            )
+        )
+        event = result.scalar_one()
+
+    assert response.status_code == 202
+    assert event.payload["email"] == "forgot@example.com"
+    assert "token=" in event.payload["reset_password_url"]
+    assert event.payload["expires_at_display"].endswith(" UTC")
+
+
+async def test_forgot_password_does_not_reveal_unknown_accounts(client: AsyncClient) -> None:
+    response = await client.post(
+        "/api/v1/auth/forgot-password",
+        json={"email": "missing-reset@example.com"},
+    )
+
+    assert response.status_code == 202
+
+
+async def test_reset_password_rotates_hash_and_allows_new_login(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "reset-login@example.com",
+            "password": "ChangeMe123!",
+            "country": "NG",
+            "phone": "+2348000000000",
+        },
+    )
+    await verify_registered_email(client, session_factory, "reset-login@example.com")
+
+    forgot_response = await client.post(
+        "/api/v1/auth/forgot-password",
+        json={"email": "reset-login@example.com"},
+    )
+    token = await password_reset_token_for_email(session_factory, "reset-login@example.com")
+    reset_response = await client.post(
+        "/api/v1/auth/reset-password",
+        json={"token": token, "password": "NewPass123!"},
+    )
+    old_login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "reset-login@example.com", "password": "ChangeMe123!"},
+    )
+    new_login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "reset-login@example.com", "password": "NewPass123!"},
+    )
+    reuse_response = await client.post(
+        "/api/v1/auth/reset-password",
+        json={"token": token, "password": "AnotherPass123!"},
+    )
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(OutboxEventModel).where(
+                OutboxEventModel.event_type == "user.password_reset_completed"
+            )
+        )
+        completion_event = result.scalar_one()
+
+    assert forgot_response.status_code == 202
+    assert reset_response.status_code == 200
+    assert old_login.status_code == 401
+    assert new_login.status_code == 200
+    assert reuse_response.status_code == 412
+    assert completion_event.payload["email"] == "reset-login@example.com"
+    assert completion_event.payload["completed_at_display"].endswith(" UTC")
+
+
+async def test_reset_password_rejects_expired_token(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "expired-reset@example.com",
+            "password": "ChangeMe123!",
+            "country": "NG",
+            "phone": "+2348000000000",
+        },
+    )
+    await client.post(
+        "/api/v1/auth/forgot-password",
+        json={"email": "expired-reset@example.com"},
+    )
+    token = await password_reset_token_for_email(session_factory, "expired-reset@example.com")
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(PasswordResetTokenModel).where(
+                PasswordResetTokenModel.token_hash == hash_auth_token(token)
+            )
+        )
+        token_row = result.scalar_one()
+        token_row.expires_at = datetime.now(UTC) - timedelta(minutes=1)
+        await session.commit()
+
+    response = await client.post(
+        "/api/v1/auth/reset-password",
+        json={"token": token, "password": "NewPass123!"},
+    )
+
+    assert response.status_code == 412
 
 
 async def test_users_me_returns_authenticated_user_profile(

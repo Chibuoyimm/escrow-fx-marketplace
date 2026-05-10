@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     access_token_expiry_minutes: int = 60
     email_verification_token_expiry_minutes: int = 60
     email_verification_frontend_url: str = "http://localhost:8000/verify-email"
+    password_reset_token_expiry_minutes: int = 60
+    password_reset_frontend_url: str = "http://localhost:8000/reset-password"
     exchange_request_expiry_minutes: int = 1440
     notification_dispatch_batch_size: int = 50
     notification_processing_timeout_seconds: int = 300

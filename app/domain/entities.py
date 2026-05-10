@@ -56,6 +56,19 @@ class EmailVerificationToken:
 
 
 @dataclass(frozen=True, slots=True)
+class PasswordResetToken:
+    """A single-use password reset token."""
+
+    id: UUID
+    user_id: UUID
+    token_hash: str
+    expires_at: datetime
+    consumed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class Currency:
     """A configured platform currency."""
 

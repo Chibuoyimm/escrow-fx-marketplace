@@ -14,6 +14,7 @@ from app.repositories.protocols import (
     ExchangeOfferRepositoryProtocol,
     ExchangeRequestRepositoryProtocol,
     OutboxEventRepositoryProtocol,
+    PasswordResetTokenRepositoryProtocol,
     TradeContractRepositoryProtocol,
     UserRepositoryProtocol,
 )
@@ -25,6 +26,7 @@ from app.repositories.sqlalchemy import (
     SqlAlchemyExchangeOfferRepository,
     SqlAlchemyExchangeRequestRepository,
     SqlAlchemyOutboxEventRepository,
+    SqlAlchemyPasswordResetTokenRepository,
     SqlAlchemyTradeContractRepository,
     SqlAlchemyUserRepository,
 )
@@ -35,6 +37,7 @@ class AbstractUnitOfWork(ABC):
 
     users: UserRepositoryProtocol
     email_verification_tokens: EmailVerificationTokenRepositoryProtocol
+    password_reset_tokens: PasswordResetTokenRepositoryProtocol
     currencies: CurrencyRepositoryProtocol
     corridors: CorridorRepositoryProtocol
     corridor_rails: CorridorRailRepositoryProtocol
@@ -71,6 +74,7 @@ class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
         self.session = self._session_factory()
         self.users = SqlAlchemyUserRepository(self.session)
         self.email_verification_tokens = SqlAlchemyEmailVerificationTokenRepository(self.session)
+        self.password_reset_tokens = SqlAlchemyPasswordResetTokenRepository(self.session)
         self.currencies = SqlAlchemyCurrencyRepository(self.session)
         self.corridors = SqlAlchemyCorridorRepository(self.session)
         self.corridor_rails = SqlAlchemyCorridorRailRepository(self.session)

@@ -107,10 +107,15 @@ verified automatically.
 ```bash
 POST /api/v1/auth/verify-email
 POST /api/v1/auth/resend-verification
+POST /api/v1/auth/forgot-password
+POST /api/v1/auth/reset-password
 ```
 
 Set `APP_EMAIL_VERIFICATION_FRONTEND_URL` to the frontend page that reads the
 token from the URL and calls `POST /api/v1/auth/verify-email`.
+
+Set `APP_PASSWORD_RESET_FRONTEND_URL` to the frontend page that reads the reset
+token from the URL and calls `POST /api/v1/auth/reset-password`.
 
 Seed reference currencies and corridors with:
 

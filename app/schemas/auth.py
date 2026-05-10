@@ -48,6 +48,19 @@ class ResendEmailVerificationRequest(BaseModel):
     email: EmailStr
 
 
+class ForgotPasswordRequest(BaseModel):
+    """Payload for requesting a password reset email."""
+
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    """Payload for resetting a password with a single-use token."""
+
+    token: str = Field(min_length=20, max_length=512)
+    password: str = Field(min_length=8, max_length=128)
+
+
 class MessageResponse(BaseModel):
     """Simple message response."""
 

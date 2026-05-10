@@ -23,6 +23,7 @@ from app.domain.entities import (
     ExchangeRequest,
     ExchangeRequestDetails,
     OutboxEvent,
+    PasswordResetToken,
     TradeContract,
     TradeContractDetails,
     User,
@@ -45,6 +46,7 @@ from app.models.email_verification_token import EmailVerificationTokenModel
 from app.models.exchange_offer import ExchangeOfferModel
 from app.models.exchange_request import ExchangeRequestModel
 from app.models.outbox_event import OutboxEventModel
+from app.models.password_reset_token import PasswordResetTokenModel
 from app.models.trade_contract import TradeContractModel
 from app.models.user import UserModel
 from app.repositories.protocols import (
@@ -55,6 +57,7 @@ from app.repositories.protocols import (
     ExchangeOfferRepositoryProtocol,
     ExchangeRequestRepositoryProtocol,
     OutboxEventRepositoryProtocol,
+    PasswordResetTokenRepositoryProtocol,
     TradeContractRepositoryProtocol,
     UserRepositoryProtocol,
 )
@@ -184,6 +187,48 @@ class SqlAlchemyEmailVerificationTokenRepository(
         model.updated_at = now
 
         await self._flush_or_raise_conflict("That email verification token could not be updated.")
+        return model.to_domain()
+
+
+class SqlAlchemyPasswordResetTokenRepository(
+    SqlAlchemyRepository,
+    PasswordResetTokenRepositoryProtocol,
+):
+    """Password reset token repository implementation."""
+
+    async def add(self, token: PasswordResetToken) -> PasswordResetToken:
+        model = PasswordResetTokenModel(
+            id=token.id,
+            user_id=token.user_id,
+            token_hash=token.token_hash,
+            expires_at=token.expires_at,
+            consumed_at=token.consumed_at,
+            created_at=token.created_at,
+            updated_at=token.updated_at,
+        )
+        self.session.add(model)
+        await self._flush_or_raise_conflict("That password reset token could not be saved.")
+        return model.to_domain()
+
+    async def get_by_token_hash(self, token_hash: str) -> PasswordResetToken:
+        statement: Select[tuple[PasswordResetTokenModel]] = select(PasswordResetTokenModel).where(
+            PasswordResetTokenModel.token_hash == token_hash
+        )
+        result = await self.session.execute(statement)
+        model = result.scalar_one_or_none()
+        if model is None:
+            raise NotFoundError("Password reset token was not found.")
+        return model.to_domain()
+
+    async def mark_consumed(self, token_id: UUID, now: datetime) -> PasswordResetToken:
+        model = await self.session.get(PasswordResetTokenModel, token_id)
+        if model is None:
+            raise NotFoundError(f"Password reset token '{token_id}' was not found.")
+
+        model.consumed_at = now
+        model.updated_at = now
+
+        await self._flush_or_raise_conflict("That password reset token could not be updated.")
         return model.to_domain()
 
 
