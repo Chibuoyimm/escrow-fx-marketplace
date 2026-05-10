@@ -532,6 +532,130 @@ async def test_reset_password_rejects_expired_token(
     assert response.status_code == 412
 
 
+async def test_change_password_requires_authentication(client: AsyncClient) -> None:
+    response = await client.post(
+        "/api/v1/auth/change-password",
+        json={
+            "current_password": "ChangeMe123!",
+            "new_password": "NewPass123!",
+        },
+    )
+
+    assert response.status_code == 401
+
+
+async def test_change_password_rotates_hash_and_queues_security_event(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "change-password@example.com",
+            "password": "ChangeMe123!",
+            "country": "NG",
+            "phone": "+2348000000000",
+        },
+    )
+    await verify_registered_email(client, session_factory, "change-password@example.com")
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "change-password@example.com", "password": "ChangeMe123!"},
+    )
+
+    response = await client.post(
+        "/api/v1/auth/change-password",
+        json={
+            "current_password": "ChangeMe123!",
+            "new_password": "EvenBetter123!",
+        },
+        headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+    )
+    old_login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "change-password@example.com", "password": "ChangeMe123!"},
+    )
+    new_login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "change-password@example.com", "password": "EvenBetter123!"},
+    )
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(OutboxEventModel).where(OutboxEventModel.event_type == "user.password_changed")
+        )
+        event = result.scalar_one()
+
+    assert response.status_code == 200
+    assert old_login.status_code == 401
+    assert new_login.status_code == 200
+    assert event.payload["email"] == "change-password@example.com"
+    assert event.payload["changed_at_display"].endswith(" UTC")
+
+
+async def test_change_password_rejects_wrong_current_password(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "wrong-current@example.com",
+            "password": "ChangeMe123!",
+            "country": "NG",
+            "phone": "+2348000000000",
+        },
+    )
+    await verify_registered_email(client, session_factory, "wrong-current@example.com")
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "wrong-current@example.com", "password": "ChangeMe123!"},
+    )
+
+    response = await client.post(
+        "/api/v1/auth/change-password",
+        json={
+            "current_password": "WrongPass123!",
+            "new_password": "EvenBetter123!",
+        },
+        headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+    )
+
+    assert response.status_code == 401
+
+
+async def test_change_password_rejects_same_password(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "same-password@example.com",
+            "password": "ChangeMe123!",
+            "country": "NG",
+            "phone": "+2348000000000",
+        },
+    )
+    await verify_registered_email(client, session_factory, "same-password@example.com")
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "same-password@example.com", "password": "ChangeMe123!"},
+    )
+
+    response = await client.post(
+        "/api/v1/auth/change-password",
+        json={
+            "current_password": "ChangeMe123!",
+            "new_password": "ChangeMe123!",
+        },
+        headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error_code"] == "invariant_violation"
+
+
 async def test_users_me_returns_authenticated_user_profile(
     client: AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],

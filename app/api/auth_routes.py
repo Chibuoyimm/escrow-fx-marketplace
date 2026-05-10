@@ -2,8 +2,11 @@
 
 from fastapi import APIRouter, Depends, status
 
+from app.api.dependencies import get_current_principal
+from app.domain.auth import AuthenticatedPrincipal
 from app.schemas.auth import (
     AccessTokenResponse,
+    ChangePasswordRequest,
     CurrentUserResponse,
     EmailVerificationResponse,
     ForgotPasswordRequest,
@@ -19,6 +22,7 @@ from app.services.auth import AuthService, get_auth_service
 
 auth_router = APIRouter(prefix="/auth", tags=["auth"])
 auth_service_dependency = Depends(get_auth_service)
+current_principal_dependency = Depends(get_current_principal)
 
 
 @auth_router.post(
@@ -103,3 +107,18 @@ async def reset_password(
     """Reset a user's password using a single-use token."""
     await auth_service.reset_password(token=payload.token, password=payload.password)
     return MessageResponse(message="Your password has been reset.")
+
+
+@auth_router.post("/change-password", response_model=MessageResponse)
+async def change_password(
+    payload: ChangePasswordRequest,
+    principal: AuthenticatedPrincipal = current_principal_dependency,
+    auth_service: AuthService = auth_service_dependency,
+) -> MessageResponse:
+    """Change the authenticated user's password."""
+    await auth_service.change_password(
+        user_id=principal.user_id,
+        current_password=payload.current_password,
+        new_password=payload.new_password,
+    )
+    return MessageResponse(message="Your password has been changed.")

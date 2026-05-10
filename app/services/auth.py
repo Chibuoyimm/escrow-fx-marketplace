@@ -367,6 +367,48 @@ class AuthService:
             )
             await uow.commit()
 
+    async def change_password(
+        self,
+        *,
+        user_id: UUID,
+        current_password: str,
+        new_password: str,
+    ) -> None:
+        """Change the password for an authenticated user."""
+        if current_password == new_password:
+            raise InvariantViolationError("New password must be different from current password.")
+
+        current_time = utc_now()
+        async with self._uow_factory() as uow:
+            user = await uow.users.get(user_id)
+            if user.status is not UserStatus.ACTIVE:
+                raise AuthenticationError("Invalid authentication credentials.")
+            if not self._security.verify_password(current_password, user.password_hash):
+                raise AuthenticationError("Invalid authentication credentials.")
+
+            await uow.users.update(
+                replace(
+                    user,
+                    password_hash=self._security.hash_password(new_password),
+                    updated_at=current_time,
+                )
+            )
+            await uow.outbox_events.add(
+                build_outbox_event(
+                    event_type="user.password_changed",
+                    aggregate_type="user",
+                    aggregate_id=user.id,
+                    recipient_user_id=user.id,
+                    payload={
+                        "user_id": str(user.id),
+                        "email": user.email,
+                        "changed_at": current_time.isoformat(),
+                        "changed_at_display": format_auth_datetime(current_time),
+                    },
+                )
+            )
+            await uow.commit()
+
     async def get_user_by_id(self, user_id: UUID) -> User:
         """Fetch a user profile by identifier."""
         async with self._uow_factory() as uow:
