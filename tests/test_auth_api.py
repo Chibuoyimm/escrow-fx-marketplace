@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from urllib.parse import parse_qs, urlparse
 
 import jwt
 import pytest
@@ -21,8 +22,10 @@ from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.request_context import register_request_context
 from app.infrastructure.security import SecurityService
 from app.main import app
+from app.models.email_verification_token import EmailVerificationTokenModel
+from app.models.outbox_event import OutboxEventModel
 from app.models.user import UserModel
-from app.services.auth import AuthService, get_auth_service
+from app.services.auth import AuthService, get_auth_service, hash_email_verification_token
 
 admin_role_dependency = Depends(require_roles(UserRole.ADMIN))
 pytestmark = pytest.mark.anyio
@@ -63,6 +66,42 @@ def build_guard_app(auth_service: AuthService) -> FastAPI:
     return application
 
 
+async def verification_token_for_email(
+    session_factory: async_sessionmaker[AsyncSession],
+    email: str,
+) -> str:
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        user = await uow.users.get_by_email(email)
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(OutboxEventModel)
+            .where(
+                OutboxEventModel.event_type == "user.email_verification_requested",
+                OutboxEventModel.recipient_user_id == user.id,
+            )
+            .order_by(OutboxEventModel.created_at.desc())
+        )
+        event = result.scalars().first()
+
+    assert event is not None
+    verification_url = event.payload["verify_email_url"]
+    token = parse_qs(urlparse(verification_url).query)["token"][0]
+    assert isinstance(token, str)
+    assert token
+    return token
+
+
+async def verify_registered_email(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    email: str,
+) -> None:
+    token = await verification_token_for_email(session_factory, email)
+    response = await client.post("/api/v1/auth/verify-email", json={"token": token})
+    assert response.status_code == 200
+
+
 async def test_register_user_succeeds(client: AsyncClient) -> None:
     response = await client.post(
         "/api/v1/auth/register",
@@ -78,7 +117,37 @@ async def test_register_user_succeeds(client: AsyncClient) -> None:
     body = response.json()
     assert body["email"] == "customer@example.com"
     assert body["country"] == "NG"
+    assert body["email_verified_at"] is None
     assert "password_hash" not in body
+
+
+async def test_register_queues_email_verification(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "verify-queued@example.com",
+            "password": "ChangeMe123!",
+            "country": "NG",
+            "phone": "+2348000000000",
+        },
+    )
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(OutboxEventModel).where(
+                OutboxEventModel.event_type == "user.email_verification_requested"
+            )
+        )
+        event = result.scalar_one()
+
+    assert event.payload["email"] == "verify-queued@example.com"
+    assert "token=" in event.payload["verify_email_url"]
+    assert event.payload["expires_at_display"].endswith(" UTC")
+    assert " at " in event.payload["expires_at_display"]
+    assert "-" not in event.payload["expires_at_display"]
 
 
 async def test_register_duplicate_email_returns_conflict(client: AsyncClient) -> None:
@@ -112,7 +181,10 @@ async def test_register_rejects_non_alpha_country_code(client: AsyncClient) -> N
     assert response.json()["error_code"] == "validation_error"
 
 
-async def test_login_succeeds_and_returns_bearer_token(client: AsyncClient) -> None:
+async def test_login_succeeds_and_returns_bearer_token(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     await client.post(
         "/api/v1/auth/register",
         json={
@@ -122,6 +194,7 @@ async def test_login_succeeds_and_returns_bearer_token(client: AsyncClient) -> N
             "phone": "+2348000000000",
         },
     )
+    await verify_registered_email(client, session_factory, "login@example.com")
 
     response = await client.post(
         "/api/v1/auth/login",
@@ -133,6 +206,26 @@ async def test_login_succeeds_and_returns_bearer_token(client: AsyncClient) -> N
     assert body["token_type"] == "bearer"
     assert body["access_token"]
     assert body["expires_in_seconds"] > 0
+
+
+async def test_login_requires_email_verification(client: AsyncClient) -> None:
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "unverified-login@example.com",
+            "password": "ChangeMe123!",
+            "country": "NG",
+            "phone": "+2348000000000",
+        },
+    )
+
+    response = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "unverified-login@example.com", "password": "ChangeMe123!"},
+    )
+
+    assert response.status_code == 412
+    assert response.json()["error_code"] == "precondition_failed"
 
 
 async def test_login_invalid_credentials_return_sanitized_error(client: AsyncClient) -> None:
@@ -156,7 +249,133 @@ async def test_login_invalid_credentials_return_sanitized_error(client: AsyncCli
     assert response.json()["detail"] == "Invalid authentication credentials."
 
 
-async def test_users_me_returns_authenticated_user_profile(client: AsyncClient) -> None:
+async def test_verify_email_allows_login(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "verify-login@example.com",
+            "password": "ChangeMe123!",
+            "country": "NG",
+            "phone": "+2348000000000",
+        },
+    )
+    token = await verification_token_for_email(session_factory, "verify-login@example.com")
+
+    verify_response = await client.post("/api/v1/auth/verify-email", json={"token": token})
+    login_response = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "verify-login@example.com", "password": "ChangeMe123!"},
+    )
+    reuse_response = await client.post("/api/v1/auth/verify-email", json={"token": token})
+
+    assert verify_response.status_code == 200
+    assert verify_response.json()["token_type"] == "bearer"
+    assert verify_response.json()["access_token"]
+    assert verify_response.json()["user"]["email_verified_at"] is not None
+    assert login_response.status_code == 200
+    assert reuse_response.status_code == 412
+
+
+async def test_verify_email_does_not_support_direct_get_link(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "get-link@example.com",
+            "password": "ChangeMe123!",
+            "country": "NG",
+            "phone": "+2348000000000",
+        },
+    )
+    token = await verification_token_for_email(session_factory, "get-link@example.com")
+
+    response = await client.get(f"/api/v1/auth/verify-email?token={token}")
+
+    assert response.status_code == 405
+
+
+async def test_verify_email_rejects_expired_token(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "expired-token@example.com",
+            "password": "ChangeMe123!",
+            "country": "NG",
+            "phone": "+2348000000000",
+        },
+    )
+    token = await verification_token_for_email(session_factory, "expired-token@example.com")
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(EmailVerificationTokenModel).where(
+                EmailVerificationTokenModel.token_hash == hash_email_verification_token(token)
+            )
+        )
+        token_row = result.scalar_one()
+        token_row.expires_at = datetime.now(UTC) - timedelta(minutes=1)
+        await session.commit()
+
+    response = await client.post("/api/v1/auth/verify-email", json={"token": token})
+
+    assert response.status_code == 412
+    assert response.json()["error_code"] == "precondition_failed"
+
+
+async def test_resend_email_verification_queues_another_event(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "resend@example.com",
+            "password": "ChangeMe123!",
+            "country": "NG",
+            "phone": "+2348000000000",
+        },
+    )
+
+    response = await client.post(
+        "/api/v1/auth/resend-verification",
+        json={"email": "resend@example.com"},
+    )
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(OutboxEventModel).where(
+                OutboxEventModel.event_type == "user.email_verification_requested"
+            )
+        )
+        events = result.scalars().all()
+
+    assert response.status_code == 202
+    assert len(events) == 2
+
+
+async def test_resend_email_verification_does_not_reveal_unknown_accounts(
+    client: AsyncClient,
+) -> None:
+    response = await client.post(
+        "/api/v1/auth/resend-verification",
+        json={"email": "missing@example.com"},
+    )
+
+    assert response.status_code == 202
+
+
+async def test_users_me_returns_authenticated_user_profile(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     await client.post(
         "/api/v1/auth/register",
         json={
@@ -166,6 +385,8 @@ async def test_users_me_returns_authenticated_user_profile(client: AsyncClient) 
             "phone": "+2348000000000",
         },
     )
+    await verify_registered_email(client, session_factory, "me@example.com")
+
     login = await client.post(
         "/api/v1/auth/login",
         json={"email": "me@example.com", "password": "ChangeMe123!"},
@@ -221,7 +442,10 @@ async def test_expired_bearer_token_returns_authentication_error(client: AsyncCl
     assert response.json()["error_code"] == "authentication_error"
 
 
-async def test_role_guard_returns_forbidden_for_non_admin(auth_service: AuthService) -> None:
+async def test_role_guard_returns_forbidden_for_non_admin(
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     async with AsyncClient(
         transport=ASGITransport(app=build_guard_app(auth_service)),
         base_url="http://testserver",
@@ -235,6 +459,7 @@ async def test_role_guard_returns_forbidden_for_non_admin(auth_service: AuthServ
                 "phone": "+2348000000000",
             },
         )
+        await verify_registered_email(client, session_factory, "customer-role@example.com")
         login = await client.post(
             "/api/v1/auth/login",
             json={"email": "customer-role@example.com", "password": "ChangeMe123!"},
@@ -322,6 +547,7 @@ async def test_users_me_fails_when_token_user_is_inactive(
             "phone": "+2348000000000",
         },
     )
+    await verify_registered_email(client, session_factory, "inactive-me@example.com")
     login = await client.post(
         "/api/v1/auth/login",
         json={"email": "inactive-me@example.com", "password": "ChangeMe123!"},

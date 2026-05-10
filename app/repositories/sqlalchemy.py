@@ -17,6 +17,7 @@ from app.domain.entities import (
     CorridorDetails,
     CorridorRail,
     Currency,
+    EmailVerificationToken,
     ExchangeOffer,
     ExchangeOfferDetails,
     ExchangeRequest,
@@ -40,6 +41,7 @@ from app.domain.exceptions import ConflictError, NotFoundError
 from app.infrastructure.exceptions import InfrastructureError
 from app.models.corridor import CorridorModel, CorridorRailModel
 from app.models.currency import CurrencyModel
+from app.models.email_verification_token import EmailVerificationTokenModel
 from app.models.exchange_offer import ExchangeOfferModel
 from app.models.exchange_request import ExchangeRequestModel
 from app.models.outbox_event import OutboxEventModel
@@ -49,6 +51,7 @@ from app.repositories.protocols import (
     CorridorRailRepositoryProtocol,
     CorridorRepositoryProtocol,
     CurrencyRepositoryProtocol,
+    EmailVerificationTokenRepositoryProtocol,
     ExchangeOfferRepositoryProtocol,
     ExchangeRequestRepositoryProtocol,
     OutboxEventRepositoryProtocol,
@@ -91,6 +94,7 @@ class SqlAlchemyUserRepository(SqlAlchemyRepository, UserRepositoryProtocol):
             status=user.status,
             kyc_status=user.kyc_status,
             risk_level=user.risk_level,
+            email_verified_at=user.email_verified_at,
             created_at=user.created_at,
             updated_at=user.updated_at,
         )
@@ -125,6 +129,7 @@ class SqlAlchemyUserRepository(SqlAlchemyRepository, UserRepositoryProtocol):
         model.status = user.status
         model.kyc_status = user.kyc_status
         model.risk_level = user.risk_level
+        model.email_verified_at = user.email_verified_at
         model.updated_at = user.updated_at
 
         await self._flush_or_raise_conflict("A user with that email already exists.")
@@ -138,6 +143,48 @@ class SqlAlchemyUserRepository(SqlAlchemyRepository, UserRepositoryProtocol):
             statement = statement.where(UserModel.status == status)
         result = await self.session.execute(statement)
         return [model.to_domain() for model in result.scalars().all()]
+
+
+class SqlAlchemyEmailVerificationTokenRepository(
+    SqlAlchemyRepository,
+    EmailVerificationTokenRepositoryProtocol,
+):
+    """Email verification token repository implementation."""
+
+    async def add(self, token: EmailVerificationToken) -> EmailVerificationToken:
+        model = EmailVerificationTokenModel(
+            id=token.id,
+            user_id=token.user_id,
+            token_hash=token.token_hash,
+            expires_at=token.expires_at,
+            consumed_at=token.consumed_at,
+            created_at=token.created_at,
+            updated_at=token.updated_at,
+        )
+        self.session.add(model)
+        await self._flush_or_raise_conflict("That email verification token could not be saved.")
+        return model.to_domain()
+
+    async def get_by_token_hash(self, token_hash: str) -> EmailVerificationToken:
+        statement: Select[tuple[EmailVerificationTokenModel]] = select(
+            EmailVerificationTokenModel
+        ).where(EmailVerificationTokenModel.token_hash == token_hash)
+        result = await self.session.execute(statement)
+        model = result.scalar_one_or_none()
+        if model is None:
+            raise NotFoundError("Email verification token was not found.")
+        return model.to_domain()
+
+    async def mark_consumed(self, token_id: UUID, now: datetime) -> EmailVerificationToken:
+        model = await self.session.get(EmailVerificationTokenModel, token_id)
+        if model is None:
+            raise NotFoundError(f"Email verification token '{token_id}' was not found.")
+
+        model.consumed_at = now
+        model.updated_at = now
+
+        await self._flush_or_raise_conflict("That email verification token could not be updated.")
+        return model.to_domain()
 
 
 class SqlAlchemyCurrencyRepository(SqlAlchemyRepository, CurrencyRepositoryProtocol):

@@ -10,6 +10,7 @@ from app.repositories.protocols import (
     CorridorRailRepositoryProtocol,
     CorridorRepositoryProtocol,
     CurrencyRepositoryProtocol,
+    EmailVerificationTokenRepositoryProtocol,
     ExchangeOfferRepositoryProtocol,
     ExchangeRequestRepositoryProtocol,
     OutboxEventRepositoryProtocol,
@@ -20,6 +21,7 @@ from app.repositories.sqlalchemy import (
     SqlAlchemyCorridorRailRepository,
     SqlAlchemyCorridorRepository,
     SqlAlchemyCurrencyRepository,
+    SqlAlchemyEmailVerificationTokenRepository,
     SqlAlchemyExchangeOfferRepository,
     SqlAlchemyExchangeRequestRepository,
     SqlAlchemyOutboxEventRepository,
@@ -32,6 +34,7 @@ class AbstractUnitOfWork(ABC):
     """Transaction boundary for application services."""
 
     users: UserRepositoryProtocol
+    email_verification_tokens: EmailVerificationTokenRepositoryProtocol
     currencies: CurrencyRepositoryProtocol
     corridors: CorridorRepositoryProtocol
     corridor_rails: CorridorRailRepositoryProtocol
@@ -67,6 +70,7 @@ class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
     async def __aenter__(self) -> SqlAlchemyUnitOfWork:
         self.session = self._session_factory()
         self.users = SqlAlchemyUserRepository(self.session)
+        self.email_verification_tokens = SqlAlchemyEmailVerificationTokenRepository(self.session)
         self.currencies = SqlAlchemyCurrencyRepository(self.session)
         self.corridors = SqlAlchemyCorridorRepository(self.session)
         self.corridor_rails = SqlAlchemyCorridorRailRepository(self.session)

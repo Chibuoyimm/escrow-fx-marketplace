@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     jwt_secret_key: str = "change-me-please-use-a-32-char-secret"
     jwt_algorithm: str = "HS256"
     access_token_expiry_minutes: int = 60
+    email_verification_token_expiry_minutes: int = 60
+    email_verification_frontend_url: str = "http://localhost:8000/verify-email"
     exchange_request_expiry_minutes: int = 1440
     notification_dispatch_batch_size: int = 50
     notification_processing_timeout_seconds: int = 300

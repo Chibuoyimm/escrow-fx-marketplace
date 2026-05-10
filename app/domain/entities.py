@@ -37,6 +37,20 @@ class User:
     status: UserStatus
     kyc_status: KycStatus
     risk_level: RiskLevel
+    email_verified_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class EmailVerificationToken:
+    """A single-use email verification token."""
+
+    id: UUID
+    user_id: UUID
+    token_hash: str
+    expires_at: datetime
+    consumed_at: datetime | None
     created_at: datetime
     updated_at: datetime
 

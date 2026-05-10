@@ -77,7 +77,9 @@ def build_user(
     password_hash: str = "hashed-password",
     status: UserStatus = UserStatus.ACTIVE,
     kyc_status: KycStatus = KycStatus.VERIFIED,
+    email_verified: bool = True,
 ) -> User:
+    current_time = now()
     return User(
         id=user_id or uuid4(),
         email=email,
@@ -88,8 +90,9 @@ def build_user(
         status=status,
         kyc_status=kyc_status,
         risk_level=RiskLevel.LOW,
-        created_at=now(),
-        updated_at=now(),
+        email_verified_at=current_time if email_verified else None,
+        created_at=current_time,
+        updated_at=current_time,
     )
 
 

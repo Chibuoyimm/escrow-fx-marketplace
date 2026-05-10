@@ -36,6 +36,24 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 
 
+class VerifyEmailRequest(BaseModel):
+    """Payload for verifying a user's email address."""
+
+    token: str = Field(min_length=20, max_length=512)
+
+
+class ResendEmailVerificationRequest(BaseModel):
+    """Payload for requesting another verification email."""
+
+    email: EmailStr
+
+
+class MessageResponse(BaseModel):
+    """Simple message response."""
+
+    message: str
+
+
 class AccessTokenClaims(BaseModel):
     """Claims stored in an access token."""
 
@@ -68,6 +86,7 @@ class UserResponseBase(BaseModel):
     status: UserStatus
     kyc_status: KycStatus
     risk_level: RiskLevel
+    email_verified_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
@@ -83,3 +102,9 @@ class RegisterUserResponse(UserResponseBase):
 
 class CurrentUserResponse(UserResponseBase):
     """Response for the authenticated user profile."""
+
+
+class EmailVerificationResponse(AccessTokenResponse):
+    """Response returned after successful email verification."""
+
+    user: CurrentUserResponse

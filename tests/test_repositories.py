@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.domain.entities import EmailVerificationToken
 from app.domain.enums import (
     CorridorStatus,
     CurrencyStatus,
@@ -28,6 +29,7 @@ from app.repositories.sqlalchemy import (
     SqlAlchemyCorridorRailRepository,
     SqlAlchemyCorridorRepository,
     SqlAlchemyCurrencyRepository,
+    SqlAlchemyEmailVerificationTokenRepository,
     SqlAlchemyExchangeOfferRepository,
     SqlAlchemyExchangeRequestRepository,
     SqlAlchemyOutboxEventRepository,
@@ -56,6 +58,33 @@ async def test_user_repository_round_trips_users(session: AsyncSession) -> None:
 
     assert created.email == user.email
     assert fetched.id == user.id
+
+
+@pytest.mark.anyio
+async def test_email_verification_token_repository_round_trips_and_consumes(
+    session: AsyncSession,
+) -> None:
+    user_repository = SqlAlchemyUserRepository(session)
+    repository = SqlAlchemyEmailVerificationTokenRepository(session)
+    user = await user_repository.add(build_user(email="verify-token@example.com"))
+    current_time = datetime.now(UTC)
+    token = await repository.add(
+        EmailVerificationToken(
+            id=uuid4(),
+            user_id=user.id,
+            token_hash="a" * 64,
+            expires_at=current_time + timedelta(hours=1),
+            consumed_at=None,
+            created_at=current_time,
+            updated_at=current_time,
+        )
+    )
+
+    fetched = await repository.get_by_token_hash(token.token_hash)
+    consumed = await repository.mark_consumed(token.id, current_time)
+
+    assert fetched.id == token.id
+    assert consumed.consumed_at == current_time
 
 
 @pytest.mark.anyio

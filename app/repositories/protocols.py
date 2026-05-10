@@ -11,6 +11,7 @@ from app.domain.entities import (
     CorridorDetails,
     CorridorRail,
     Currency,
+    EmailVerificationToken,
     ExchangeOffer,
     ExchangeOfferDetails,
     ExchangeRequest,
@@ -51,6 +52,22 @@ class UserRepositoryProtocol(ABC):
     @abstractmethod
     async def list_all(self, status: UserStatus | None = None) -> list[User]:
         """List users, optionally filtered by status."""
+
+
+class EmailVerificationTokenRepositoryProtocol(ABC):
+    """Email verification token repository contract."""
+
+    @abstractmethod
+    async def add(self, token: EmailVerificationToken) -> EmailVerificationToken:
+        """Persist an email verification token."""
+
+    @abstractmethod
+    async def get_by_token_hash(self, token_hash: str) -> EmailVerificationToken:
+        """Fetch an email verification token by hashed token."""
+
+    @abstractmethod
+    async def mark_consumed(self, token_id: UUID, now: datetime) -> EmailVerificationToken:
+        """Mark a token as consumed."""
 
 
 class CurrencyRepositoryProtocol(ABC):

@@ -100,6 +100,18 @@ Bootstrap the first admin user with:
 .venv/bin/python -m app.bootstrap_admin create-admin --email admin@example.com --password "ChangeMe123!" --country NG
 ```
 
+Customer registration now queues an email verification notification. Customers
+must verify their email before login; bootstrap/admin-created users are marked
+verified automatically.
+
+```bash
+POST /api/v1/auth/verify-email
+POST /api/v1/auth/resend-verification
+```
+
+Set `APP_EMAIL_VERIFICATION_FRONTEND_URL` to the frontend page that reads the
+token from the URL and calls `POST /api/v1/auth/verify-email`.
+
 Seed reference currencies and corridors with:
 
 ```bash

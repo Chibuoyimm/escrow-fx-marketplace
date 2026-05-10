@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Enum, String
+from datetime import datetime
+
+from sqlalchemy import DateTime, Enum, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.domain.entities import User
@@ -29,6 +31,10 @@ class UserModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     risk_level: Mapped[RiskLevel] = mapped_column(
         Enum(RiskLevel, native_enum=False, validate_strings=True)
     )
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
     def to_domain(self) -> User:
         """Convert the ORM row to a domain entity."""
@@ -42,6 +48,7 @@ class UserModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             status=self.status,
             kyc_status=self.kyc_status,
             risk_level=self.risk_level,
+            email_verified_at=self.email_verified_at,
             created_at=self.created_at,
             updated_at=self.updated_at,
         )

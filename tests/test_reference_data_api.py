@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
@@ -82,7 +84,10 @@ async def seed_reference_entities(
     }
 
 
-async def authenticate(client: AsyncClient) -> dict[str, str]:
+async def authenticate(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> dict[str, str]:
     await client.post(
         "/api/v1/auth/register",
         json={
@@ -92,6 +97,16 @@ async def authenticate(client: AsyncClient) -> dict[str, str]:
             "phone": "+2348000000000",
         },
     )
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        user = await uow.users.get_by_email("customer@example.com")
+        await uow.users.update(
+            replace(
+                user,
+                email_verified_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await uow.commit()
     login = await client.post(
         "/api/v1/auth/login",
         json={"email": "customer@example.com", "password": "ChangeMe123!"},
@@ -153,7 +168,7 @@ async def test_list_corridors_returns_active_corridors_for_authenticated_users(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     await seed_reference_entities(session_factory)
-    headers = await authenticate(client)
+    headers = await authenticate(client, session_factory)
 
     response = await client.get("/api/v1/corridors", headers=headers)
 
@@ -180,7 +195,7 @@ async def test_get_corridor_by_id_returns_active_corridor(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     references = await seed_reference_entities(session_factory)
-    headers = await authenticate(client)
+    headers = await authenticate(client, session_factory)
 
     response = await client.get(
         f"/api/v1/corridors/{references['active_corridor_id']}",
@@ -196,7 +211,7 @@ async def test_get_corridor_by_currency_pair_returns_active_corridor(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     await seed_reference_entities(session_factory)
-    headers = await authenticate(client)
+    headers = await authenticate(client, session_factory)
 
     response = await client.get("/api/v1/corridors/usd/ngn", headers=headers)
 
@@ -210,7 +225,7 @@ async def test_inactive_corridors_are_hidden_from_both_lookup_styles(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     references = await seed_reference_entities(session_factory)
-    headers = await authenticate(client)
+    headers = await authenticate(client, session_factory)
 
     by_id_response = await client.get(
         f"/api/v1/corridors/{references['inactive_corridor_id']}",
