@@ -21,6 +21,7 @@ app/
 ```
 
 The detailed product and system plan lives in [`docs/escrow-plan.md`](docs/escrow-plan.md).
+Agent-facing codebase guidance lives in [`AGENTS.md`](AGENTS.md).
 
 ## Local Setup
 
