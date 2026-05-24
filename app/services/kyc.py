@@ -150,6 +150,14 @@ class KycService:
                         updated_at=current_time,
                     )
                 )
+                await self._outbox.user_kyc_requires_review(
+                    uow,
+                    user_id=user.id,
+                    verification_id=verification.id,
+                    id_type=id_type.value,
+                    provider=result.provider.value,
+                    reason=self._review_reason(result),
+                )
             elif result.status is KycVerificationStatus.REJECTED:
                 await uow.users.update(
                     replace(
@@ -174,6 +182,110 @@ class KycService:
         """Fetch the latest KYC verification attempt for a user."""
         async with self._uow_factory() as uow:
             return await uow.kyc_verifications.get_latest_for_user(user_id)
+
+    async def approve_review(
+        self,
+        *,
+        verification_id: UUID,
+        reviewer_user_id: UUID,
+    ) -> KycVerification:
+        """Approve a KYC verification that requires manual review."""
+        current_time = utc_now()
+        async with self._uow_factory() as uow:
+            verification = await uow.kyc_verifications.get(verification_id)
+            if verification.status is not KycVerificationStatus.REQUIRES_REVIEW:
+                raise PreconditionFailedError(
+                    "Only KYC verifications requiring review can be approved."
+                )
+
+            updated = await uow.kyc_verifications.update(
+                replace(
+                    verification,
+                    status=KycVerificationStatus.VERIFIED,
+                    provider_status="approved_by_admin",
+                    field_match_summary={
+                        **verification.field_match_summary,
+                        "admin_review": {
+                            "decision": KycVerificationStatus.VERIFIED.value,
+                            "reviewer_user_id": str(reviewer_user_id),
+                            "reviewed_at": current_time.isoformat(),
+                        },
+                    },
+                    completed_at=verification.completed_at or current_time,
+                    updated_at=current_time,
+                )
+            )
+            user = await uow.users.get(updated.user_id)
+            await uow.users.update(
+                replace(
+                    user,
+                    kyc_status=KycStatus.VERIFIED,
+                    updated_at=current_time,
+                )
+            )
+            await self._outbox.user_kyc_verified(
+                uow,
+                user_id=user.id,
+                verification_id=updated.id,
+                id_type=updated.id_type.value,
+                provider=updated.provider.value,
+            )
+            await uow.commit()
+            return updated
+
+    async def reject_review(
+        self,
+        *,
+        verification_id: UUID,
+        reviewer_user_id: UUID,
+        reason: str,
+    ) -> KycVerification:
+        """Reject a KYC verification that requires manual review."""
+        current_time = utc_now()
+        async with self._uow_factory() as uow:
+            verification = await uow.kyc_verifications.get(verification_id)
+            if verification.status is not KycVerificationStatus.REQUIRES_REVIEW:
+                raise PreconditionFailedError(
+                    "Only KYC verifications requiring review can be rejected."
+                )
+
+            updated = await uow.kyc_verifications.update(
+                replace(
+                    verification,
+                    status=KycVerificationStatus.REJECTED,
+                    provider_status="rejected_by_admin",
+                    field_match_summary={
+                        **verification.field_match_summary,
+                        "admin_review": {
+                            "decision": KycVerificationStatus.REJECTED.value,
+                            "reviewer_user_id": str(reviewer_user_id),
+                            "reviewed_at": current_time.isoformat(),
+                            "reason": reason,
+                        },
+                    },
+                    rejection_reason=reason,
+                    completed_at=verification.completed_at or current_time,
+                    updated_at=current_time,
+                )
+            )
+            user = await uow.users.get(updated.user_id)
+            await uow.users.update(
+                replace(
+                    user,
+                    kyc_status=KycStatus.REJECTED,
+                    updated_at=current_time,
+                )
+            )
+            await self._outbox.user_kyc_rejected(
+                uow,
+                user_id=user.id,
+                verification_id=updated.id,
+                id_type=updated.id_type.value,
+                provider=updated.provider.value,
+                reason=reason,
+            )
+            await uow.commit()
+            return updated
 
     async def process_youverify_webhook(self, payload: dict[str, object]) -> KycVerification:
         """Apply a verified Youverify webhook payload to the matching KYC attempt."""
@@ -227,6 +339,7 @@ class KycService:
         if verification.status in {
             KycVerificationStatus.VERIFIED,
             KycVerificationStatus.REJECTED,
+            KycVerificationStatus.REQUIRES_REVIEW,
         }:
             return verification
         if result.status is KycVerificationStatus.PENDING:
@@ -275,6 +388,14 @@ class KycService:
                     kyc_status=KycStatus.REQUIRES_REVIEW,
                     updated_at=current_time,
                 )
+            )
+            await self._outbox.user_kyc_requires_review(
+                uow,
+                user_id=user.id,
+                verification_id=updated.id,
+                id_type=updated.id_type.value,
+                provider=updated.provider.value,
+                reason=self._review_reason(result),
             )
         elif result.status is KycVerificationStatus.REJECTED:
             await uow.users.update(
@@ -343,6 +464,16 @@ class KycService:
             if isinstance(value, bool):
                 return value
         return None
+
+    @staticmethod
+    def _review_reason(result: KycProviderResult) -> str:
+        """Return a stable reason string for review-needed KYC outcomes."""
+        policy = result.field_match_summary.get("policy")
+        if isinstance(policy, dict):
+            reason = policy.get("reason")
+            if isinstance(reason, str) and reason:
+                return reason
+        return "kyc_requires_manual_review"
 
 
 def get_kyc_service() -> KycService:

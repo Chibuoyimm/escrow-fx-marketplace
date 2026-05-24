@@ -48,3 +48,17 @@ class KycVerificationResponse(BaseModel):
     completed_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class AdminKycRejectRequest(BaseModel):
+    """Payload for rejecting a reviewed KYC verification."""
+
+    reason: str = Field(min_length=1, max_length=500)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def strip_reason(cls, value: object) -> object:
+        """Trim reason text before validation."""
+        if isinstance(value, str):
+            return value.strip()
+        return value

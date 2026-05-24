@@ -314,6 +314,18 @@ class SqlAlchemyKycVerificationRepository(
         result = await self.session.execute(statement)
         return [model.to_domain() for model in result.scalars().all()]
 
+    async def list_admin(
+        self,
+        status: KycVerificationStatus | None = None,
+    ) -> list[KycVerification]:
+        statement: Select[tuple[KycVerificationModel]] = select(KycVerificationModel).order_by(
+            KycVerificationModel.created_at.desc()
+        )
+        if status is not None:
+            statement = statement.where(KycVerificationModel.status == status)
+        result = await self.session.execute(statement)
+        return [model.to_domain() for model in result.scalars().all()]
+
     async def update(self, verification: KycVerification) -> KycVerification:
         model = await self.session.get(KycVerificationModel, verification.id)
         if model is None:

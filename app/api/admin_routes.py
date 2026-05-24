@@ -1,13 +1,17 @@
-"""Admin inspection routes."""
+"""Admin inspection and review routes."""
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, Query
 
-from app.api.dependencies import require_roles
+from app.api.dependencies import get_current_principal, require_roles
+from app.domain.auth import AuthenticatedPrincipal
 from app.domain.enums import (
     ExchangeOfferStatus,
     ExchangeRequestStatus,
+    KycVerificationStatus,
     OutboxEventStatus,
     TradeContractStatus,
     UserRole,
@@ -16,9 +20,11 @@ from app.domain.enums import (
 from app.schemas.auth import CurrentUserResponse
 from app.schemas.exchange_offer import ExchangeOfferResponse
 from app.schemas.exchange_request import ExchangeRequestResponse
+from app.schemas.kyc import AdminKycRejectRequest, KycVerificationResponse
 from app.schemas.outbox import OutboxEventResponse
 from app.schemas.trade import TradeContractResponse
 from app.services.admin import AdminService, get_admin_service
+from app.services.kyc import KycService, get_kyc_service
 
 admin_router = APIRouter(
     prefix="/admin",
@@ -26,12 +32,15 @@ admin_router = APIRouter(
     dependencies=[Depends(require_roles(UserRole.ADMIN, UserRole.OPERATIONS))],
 )
 admin_service_dependency = Depends(get_admin_service)
+kyc_service_dependency = Depends(get_kyc_service)
+principal_dependency = Depends(get_current_principal)
 user_status_query = Query(default=None)
 exchange_request_status_query = Query(default=None)
 exchange_offer_status_query = Query(default=None)
 trade_contract_status_query = Query(default=None)
 outbox_event_status_query = Query(default=None)
 outbox_event_type_query = Query(default=None)
+kyc_verification_status_query = Query(default=None)
 
 
 @admin_router.get("/users", response_model=list[CurrentUserResponse])
@@ -88,3 +97,53 @@ async def list_events(
     """List outbox events for admin inspection."""
     events = await admin_service.list_events(status=status, event_type=event_type)
     return [OutboxEventResponse.model_validate(event) for event in events]
+
+
+@admin_router.get("/kyc", response_model=list[KycVerificationResponse])
+async def list_kyc_verifications(
+    status: KycVerificationStatus | None = kyc_verification_status_query,
+    admin_service: AdminService = admin_service_dependency,
+) -> list[KycVerificationResponse]:
+    """List KYC verification attempts for admin inspection."""
+    verifications = await admin_service.list_kyc_verifications(status)
+    return [KycVerificationResponse.model_validate(verification) for verification in verifications]
+
+
+@admin_router.get("/kyc/{verification_id}", response_model=KycVerificationResponse)
+async def get_kyc_verification(
+    verification_id: UUID,
+    admin_service: AdminService = admin_service_dependency,
+) -> KycVerificationResponse:
+    """Fetch a KYC verification attempt for admin inspection."""
+    verification = await admin_service.get_kyc_verification(str(verification_id))
+    return KycVerificationResponse.model_validate(verification)
+
+
+@admin_router.post("/kyc/{verification_id}/approve", response_model=KycVerificationResponse)
+async def approve_kyc_review(
+    verification_id: UUID,
+    principal: AuthenticatedPrincipal = principal_dependency,
+    kyc_service: KycService = kyc_service_dependency,
+) -> KycVerificationResponse:
+    """Approve a KYC verification that requires manual review."""
+    verification = await kyc_service.approve_review(
+        verification_id=verification_id,
+        reviewer_user_id=principal.user_id,
+    )
+    return KycVerificationResponse.model_validate(verification)
+
+
+@admin_router.post("/kyc/{verification_id}/reject", response_model=KycVerificationResponse)
+async def reject_kyc_review(
+    verification_id: UUID,
+    payload: AdminKycRejectRequest,
+    principal: AuthenticatedPrincipal = principal_dependency,
+    kyc_service: KycService = kyc_service_dependency,
+) -> KycVerificationResponse:
+    """Reject a KYC verification that requires manual review."""
+    verification = await kyc_service.reject_review(
+        verification_id=verification_id,
+        reviewer_user_id=principal.user_id,
+        reason=payload.reason,
+    )
+    return KycVerificationResponse.model_validate(verification)

@@ -314,7 +314,10 @@ async def test_submit_kyc_routes_incomplete_verified_matches_to_requires_review(
     async with session_factory() as session:
         event_result = await session.execute(select(OutboxEventModel))
         events = event_result.scalars().all()
-    assert [event.event_type for event in events] == ["user.kyc_submitted"]
+    assert [event.event_type for event in events] == [
+        "user.kyc_submitted",
+        "user.kyc_requires_review",
+    ]
 
 
 async def test_submit_kyc_rejects_missing_subject_consent(
@@ -512,6 +515,14 @@ async def test_reconcile_pending_kyc_routes_incomplete_verified_matches_to_revie
     assert updated_verification.status is KycVerificationStatus.REQUIRES_REVIEW
     assert updated_verification.completed_at is not None
     assert updated_verification.field_match_summary["policy"]["decision"] == "requires_review"
+
+    async with session_factory() as session:
+        event_result = await session.execute(select(OutboxEventModel))
+        events = event_result.scalars().all()
+    assert [event.event_type for event in events] == [
+        "user.kyc_submitted",
+        "user.kyc_requires_review",
+    ]
 
 
 async def test_reconcile_pending_kyc_noops_when_provider_still_pending(

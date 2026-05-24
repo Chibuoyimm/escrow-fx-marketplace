@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from app.domain.entities import (
     ExchangeOfferDetails,
     ExchangeRequestDetails,
+    KycVerification,
     OutboxEvent,
     TradeContractDetails,
     User,
@@ -12,6 +15,7 @@ from app.domain.entities import (
 from app.domain.enums import (
     ExchangeOfferStatus,
     ExchangeRequestStatus,
+    KycVerificationStatus,
     OutboxEventStatus,
     TradeContractStatus,
     UserStatus,
@@ -63,6 +67,19 @@ class AdminService:
         """List outbox events for admin inspection."""
         async with self._uow_factory() as uow:
             return await uow.outbox_events.list_admin(status, event_type)
+
+    async def list_kyc_verifications(
+        self,
+        status: KycVerificationStatus | None = None,
+    ) -> list[KycVerification]:
+        """List KYC verification attempts for admin inspection."""
+        async with self._uow_factory() as uow:
+            return await uow.kyc_verifications.list_admin(status)
+
+    async def get_kyc_verification(self, verification_id: str) -> KycVerification:
+        """Fetch a KYC verification attempt for admin inspection."""
+        async with self._uow_factory() as uow:
+            return await uow.kyc_verifications.get(UUID(verification_id))
 
 
 def get_admin_service() -> AdminService:

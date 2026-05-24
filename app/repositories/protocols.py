@@ -121,6 +121,13 @@ class KycVerificationRepositoryProtocol(ABC):
         """List KYC verification attempts by status."""
 
     @abstractmethod
+    async def list_admin(
+        self,
+        status: KycVerificationStatus | None = None,
+    ) -> list[KycVerification]:
+        """List KYC verification attempts for admin inspection."""
+
+    @abstractmethod
     async def update(self, verification: KycVerification) -> KycVerification:
         """Persist changes to an existing KYC verification attempt."""
 

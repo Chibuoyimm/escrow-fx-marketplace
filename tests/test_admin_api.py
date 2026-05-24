@@ -3,17 +3,22 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.domain.entities import KycVerification
 from app.domain.enums import (
     CurrencyStatus,
     ExchangeOfferStatus,
     ExchangeRequestStatus,
+    KycIdType,
+    KycProvider,
+    KycStatus,
+    KycVerificationStatus,
     OutboxEventStatus,
     TradeContractStatus,
     UserRole,
@@ -25,6 +30,7 @@ from app.main import app
 from app.models.outbox_event import OutboxEventModel
 from app.services.admin import AdminService, get_admin_service
 from app.services.auth import AuthService, get_auth_service
+from app.services.kyc import KycService, get_kyc_service
 from app.services.outbox import build_outbox_event
 from tests.conftest import (
     build_currency,
@@ -53,12 +59,19 @@ def admin_service(session_factory: async_sessionmaker[AsyncSession]) -> AdminSer
 
 
 @pytest.fixture
+def kyc_service(session_factory: async_sessionmaker[AsyncSession]) -> KycService:
+    return KycService(uow_factory=lambda: SqlAlchemyUnitOfWork(session_factory))
+
+
+@pytest.fixture
 async def client(
     auth_service: AuthService,
     admin_service: AdminService,
+    kyc_service: KycService,
 ) -> AsyncIterator[AsyncClient]:
     app.dependency_overrides[get_auth_service] = lambda: auth_service
     app.dependency_overrides[get_admin_service] = lambda: admin_service
+    app.dependency_overrides[get_kyc_service] = lambda: kyc_service
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://testserver",
@@ -94,6 +107,57 @@ async def create_user_and_token(
 
     token_response = await auth_service.login_user(email=email, password=PASSWORD)
     return {"Authorization": f"Bearer {token_response.access_token}"}, user.id.hex
+
+
+async def seed_review_kyc_verification(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    email: str = "review-user@example.com",
+) -> tuple[str, str]:
+    security = SecurityService()
+    now = datetime.now(UTC)
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        user = await uow.users.add(
+            build_user(
+                email=email,
+                password_hash=security.hash_password(PASSWORD),
+                kyc_status=KycStatus.REQUIRES_REVIEW,
+            )
+        )
+        verification = await uow.kyc_verifications.add(
+            KycVerification(
+                id=uuid4(),
+                user_id=user.id,
+                provider=KycProvider.LOCAL,
+                provider_reference_id=f"review-{uuid4()}",
+                id_type=KycIdType.BVN,
+                masked_identifier="22*****2221",
+                identifier_hash="hashed-identifier",
+                status=KycVerificationStatus.REQUIRES_REVIEW,
+                provider_status="verified",
+                field_match_summary={
+                    "first_name": True,
+                    "policy": {
+                        "decision": "requires_review",
+                        "reason": "required_identity_fields_incomplete",
+                        "required_matches": {
+                            "first_name": True,
+                            "last_name": None,
+                            "date_of_birth": None,
+                        },
+                    },
+                },
+                rejection_reason=None,
+                consented_at=now,
+                submitted_at=now,
+                completed_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await uow.commit()
+
+    return str(user.id), str(verification.id)
 
 
 async def seed_admin_marketplace_data(
@@ -345,3 +409,152 @@ async def test_admin_lists_outbox_events_with_filters(
     assert type_response.status_code == 200
     assert [event["id"] for event in type_response.json()] == [str(failed_event.id)]
     assert type_response.json()[0]["last_error"] == "provider timeout"
+
+
+async def test_admin_lists_and_gets_kyc_verifications(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    admin_headers, _ = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="kyc-admin@example.com",
+        role=UserRole.ADMIN,
+    )
+    _, verification_id = await seed_review_kyc_verification(session_factory)
+
+    list_response = await client.get(
+        "/api/v1/admin/kyc?status=requires_review",
+        headers=admin_headers,
+    )
+    get_response = await client.get(
+        f"/api/v1/admin/kyc/{verification_id}",
+        headers=admin_headers,
+    )
+
+    assert list_response.status_code == 200
+    assert [verification["id"] for verification in list_response.json()] == [verification_id]
+    assert get_response.status_code == 200
+    assert get_response.json()["id"] == verification_id
+    assert get_response.json()["status"] == "requires_review"
+
+
+async def test_admin_can_approve_review_kyc(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    admin_headers, admin_user_id = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="approve-kyc-admin@example.com",
+        role=UserRole.ADMIN,
+    )
+    user_id, verification_id = await seed_review_kyc_verification(session_factory)
+
+    response = await client.post(
+        f"/api/v1/admin/kyc/{verification_id}/approve",
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "verified"
+    assert response.json()["field_match_summary"]["admin_review"]["decision"] == "verified"
+    assert response.json()["field_match_summary"]["admin_review"]["reviewer_user_id"] == str(
+        UUID(admin_user_id)
+    )
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        user = await uow.users.get(UUID(user_id))
+        verification = await uow.kyc_verifications.get(UUID(verification_id))
+    assert user.kyc_status is KycStatus.VERIFIED
+    assert verification.status is KycVerificationStatus.VERIFIED
+    assert verification.provider_status == "approved_by_admin"
+
+    async with session_factory() as session:
+        event_result = await session.execute(select(OutboxEventModel))
+        events = event_result.scalars().all()
+    assert [event.event_type for event in events] == ["user.kyc_verified"]
+
+
+async def test_admin_can_reject_review_kyc(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    admin_headers, admin_user_id = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="reject-kyc-admin@example.com",
+        role=UserRole.ADMIN,
+    )
+    user_id, verification_id = await seed_review_kyc_verification(session_factory)
+
+    response = await client.post(
+        f"/api/v1/admin/kyc/{verification_id}/reject",
+        headers=admin_headers,
+        json={"reason": "Documents did not match the identity record."},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "rejected"
+    assert response.json()["rejection_reason"] == "Documents did not match the identity record."
+    assert response.json()["field_match_summary"]["admin_review"]["decision"] == "rejected"
+    assert response.json()["field_match_summary"]["admin_review"]["reviewer_user_id"] == str(
+        UUID(admin_user_id)
+    )
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        user = await uow.users.get(UUID(user_id))
+        verification = await uow.kyc_verifications.get(UUID(verification_id))
+    assert user.kyc_status is KycStatus.REJECTED
+    assert verification.status is KycVerificationStatus.REJECTED
+    assert verification.provider_status == "rejected_by_admin"
+
+    async with session_factory() as session:
+        event_result = await session.execute(select(OutboxEventModel))
+        events = event_result.scalars().all()
+    assert [event.event_type for event in events] == ["user.kyc_rejected"]
+
+
+async def test_admin_cannot_review_non_review_kyc(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    admin_headers, _ = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="bad-review-admin@example.com",
+        role=UserRole.ADMIN,
+    )
+    user_id, verification_id = await seed_review_kyc_verification(session_factory)
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        verification = await uow.kyc_verifications.get(UUID(verification_id))
+        await uow.kyc_verifications.update(
+            replace(
+                verification,
+                status=KycVerificationStatus.VERIFIED,
+                provider_status="verified",
+                updated_at=datetime.now(UTC),
+            )
+        )
+        user = await uow.users.get(UUID(user_id))
+        await uow.users.update(
+            replace(
+                user,
+                kyc_status=KycStatus.VERIFIED,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await uow.commit()
+
+    response = await client.post(
+        f"/api/v1/admin/kyc/{verification_id}/approve",
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 412
+    assert response.json()["error_code"] == "precondition_failed"
