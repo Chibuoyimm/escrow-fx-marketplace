@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hmac
 from dataclasses import dataclass
 from datetime import date
+from hashlib import sha256
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -219,6 +221,35 @@ class YouverifyKycProvider:
             },
             rejection_reason=YouverifyKycProvider._rejection_reason(payload, data, status),
         )
+
+    @staticmethod
+    def result_from_webhook(
+        *,
+        id_type: KycIdType,
+        payload: dict[str, Any],
+    ) -> KycProviderResult:
+        """Build a provider-neutral result from a Youverify webhook payload."""
+        return YouverifyKycProvider._result_from_payload(id_type, payload)
+
+    @staticmethod
+    def provider_reference_from_payload(payload: dict[str, Any]) -> str:
+        """Extract the provider reference from a Youverify payload."""
+        data = YouverifyKycProvider._as_dict(payload.get("data"))
+        return YouverifyKycProvider._provider_reference(payload, data)
+
+    @staticmethod
+    def verify_webhook_signature(
+        *,
+        raw_body: bytes,
+        signature: str,
+        secret: str,
+    ) -> bool:
+        """Verify a Youverify webhook signature."""
+        expected = hmac.new(secret.encode(), raw_body, sha256).hexdigest()
+        received = signature.strip()
+        if received.startswith("sha256="):
+            received = received.removeprefix("sha256=")
+        return hmac.compare_digest(expected, received)
 
     @staticmethod
     def _provider_reference(payload: dict[str, Any], data: dict[str, Any]) -> str:

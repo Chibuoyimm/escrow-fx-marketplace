@@ -11,7 +11,14 @@ from app.domain.entities import KycVerification
 from app.domain.enums import KycIdType, KycStatus, KycVerificationStatus, UserStatus
 from app.domain.exceptions import InvariantViolationError, PreconditionFailedError
 from app.infrastructure.config import settings
-from app.integrations.youverify import KycProviderProtocol, KycProviderRequest, build_kyc_provider
+from app.infrastructure.database.unit_of_work import AbstractUnitOfWork
+from app.integrations.youverify import (
+    KycProviderProtocol,
+    KycProviderRequest,
+    KycProviderResult,
+    YouverifyKycProvider,
+    build_kyc_provider,
+)
 from app.services._shared import UnitOfWorkFactory, build_uow, utc_now
 from app.services.outbox import OutboxEventPublisher
 
@@ -151,11 +158,25 @@ class KycService:
         async with self._uow_factory() as uow:
             return await uow.kyc_verifications.get_latest_for_user(user_id)
 
+    async def process_youverify_webhook(self, payload: dict[str, object]) -> KycVerification:
+        """Apply a verified Youverify webhook payload to the matching KYC attempt."""
+        provider_reference_id = YouverifyKycProvider.provider_reference_from_payload(payload)
+        async with self._uow_factory() as uow:
+            verification = await uow.kyc_verifications.get_by_provider_reference(
+                provider_reference_id
+            )
+            result = YouverifyKycProvider.result_from_webhook(
+                id_type=verification.id_type,
+                payload=payload,
+            )
+            updated = await self._apply_provider_result(uow, verification, result)
+            await uow.commit()
+            return updated
+
     async def reconcile_pending(self, *, limit: int | None = None) -> int:
         """Refresh pending KYC attempts from the configured provider."""
         batch_size = limit or settings.kyc_reconciliation_batch_size
         completed = 0
-        current_time = utc_now()
 
         async with self._uow_factory() as uow:
             pending_verifications = await uow.kyc_verifications.list_by_status(
@@ -167,64 +188,89 @@ class KycService:
                     provider_reference_id=verification.provider_reference_id,
                     id_type=verification.id_type,
                 )
-                if result.status is KycVerificationStatus.PENDING:
-                    continue
-
-                updated = await uow.kyc_verifications.update(
-                    replace(
-                        verification,
-                        status=result.status,
-                        provider_status=result.provider_status,
-                        field_match_summary=result.field_match_summary,
-                        rejection_reason=result.rejection_reason,
-                        completed_at=current_time
-                        if result.status
-                        in {
-                            KycVerificationStatus.VERIFIED,
-                            KycVerificationStatus.REJECTED,
-                        }
-                        else verification.completed_at,
-                        updated_at=current_time,
-                    )
-                )
-                user = await uow.users.get(updated.user_id)
-                if result.status is KycVerificationStatus.VERIFIED:
-                    await uow.users.update(
-                        replace(
-                            user,
-                            kyc_status=KycStatus.VERIFIED,
-                            updated_at=current_time,
-                        )
-                    )
-                    await self._outbox.user_kyc_verified(
-                        uow,
-                        user_id=user.id,
-                        verification_id=updated.id,
-                        id_type=updated.id_type.value,
-                        provider=updated.provider.value,
-                    )
-                    completed += 1
-                elif result.status is KycVerificationStatus.REJECTED:
-                    await uow.users.update(
-                        replace(
-                            user,
-                            kyc_status=KycStatus.REJECTED,
-                            updated_at=current_time,
-                        )
-                    )
-                    await self._outbox.user_kyc_rejected(
-                        uow,
-                        user_id=user.id,
-                        verification_id=updated.id,
-                        id_type=updated.id_type.value,
-                        provider=updated.provider.value,
-                        reason=result.rejection_reason or "KYC verification was rejected.",
-                    )
+                updated = await self._apply_provider_result(uow, verification, result)
+                if (
+                    updated.status
+                    in {
+                        KycVerificationStatus.VERIFIED,
+                        KycVerificationStatus.REJECTED,
+                    }
+                    and verification.status is KycVerificationStatus.PENDING
+                ):
                     completed += 1
 
             await uow.commit()
 
         return completed
+
+    async def _apply_provider_result(
+        self,
+        uow: AbstractUnitOfWork,
+        verification: KycVerification,
+        result: KycProviderResult,
+    ) -> KycVerification:
+        """Apply a provider result to a KYC verification idempotently."""
+        if verification.status in {
+            KycVerificationStatus.VERIFIED,
+            KycVerificationStatus.REJECTED,
+        }:
+            return verification
+        if result.status is KycVerificationStatus.PENDING:
+            return verification
+
+        current_time = utc_now()
+        updated = await uow.kyc_verifications.update(
+            replace(
+                verification,
+                status=result.status,
+                provider_status=result.provider_status,
+                field_match_summary=result.field_match_summary,
+                rejection_reason=result.rejection_reason,
+                completed_at=current_time
+                if result.status
+                in {
+                    KycVerificationStatus.VERIFIED,
+                    KycVerificationStatus.REJECTED,
+                }
+                else verification.completed_at,
+                updated_at=current_time,
+            )
+        )
+
+        user = await uow.users.get(updated.user_id)
+        if result.status is KycVerificationStatus.VERIFIED:
+            await uow.users.update(
+                replace(
+                    user,
+                    kyc_status=KycStatus.VERIFIED,
+                    updated_at=current_time,
+                )
+            )
+            await self._outbox.user_kyc_verified(
+                uow,
+                user_id=user.id,
+                verification_id=updated.id,
+                id_type=updated.id_type.value,
+                provider=updated.provider.value,
+            )
+        elif result.status is KycVerificationStatus.REJECTED:
+            await uow.users.update(
+                replace(
+                    user,
+                    kyc_status=KycStatus.REJECTED,
+                    updated_at=current_time,
+                )
+            )
+            await self._outbox.user_kyc_rejected(
+                uow,
+                user_id=user.id,
+                verification_id=updated.id,
+                id_type=updated.id_type.value,
+                provider=updated.provider.value,
+                reason=result.rejection_reason or "KYC verification was rejected.",
+            )
+
+        return updated
 
 
 def get_kyc_service() -> KycService:

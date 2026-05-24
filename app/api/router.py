@@ -12,6 +12,7 @@ from app.api.offer_routes import offer_router
 from app.api.routes import health_router
 from app.api.trade_routes import trade_router
 from app.api.user_routes import users_router
+from app.api.webhook_routes import webhook_router
 from app.infrastructure.config import settings
 
 api_router = APIRouter(prefix=settings.api_v1_prefix)
@@ -25,3 +26,4 @@ api_router.include_router(offer_router)
 api_router.include_router(health_router)
 api_router.include_router(trade_router)
 api_router.include_router(users_router)
+api_router.include_router(webhook_router)

@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     kyc_reconciliation_batch_size: int = 50
     youverify_base_url: str = "https://api.youverify.co"
     youverify_api_key: str | None = None
+    youverify_webhook_secret: str | None = None
     youverify_bvn_endpoint: str = "/v2/api/identity/ng/bvn"
     jwt_issuer: str = "escrow-fx-marketplace"
 
