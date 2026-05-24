@@ -23,6 +23,7 @@ class KycStatus(StrEnum):
     """KYC lifecycle states."""
 
     PENDING = "pending"
+    REQUIRES_REVIEW = "requires_review"
     VERIFIED = "verified"
     REJECTED = "rejected"
 

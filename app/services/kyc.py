@@ -75,19 +75,28 @@ class KycService:
                     "Nigeria KYC is currently supported for NG users only."
                 )
 
-            result = await self._provider.verify_identity(
-                KycProviderRequest(
-                    user_id=str(user.id),
-                    id_type=id_type,
-                    id_number=id_number,
-                    first_name=first_name,
-                    last_name=last_name,
-                    date_of_birth=date_of_birth,
+            result = self._apply_decision_policy(
+                await self._provider.verify_identity(
+                    KycProviderRequest(
+                        user_id=str(user.id),
+                        id_type=id_type,
+                        id_number=id_number,
+                        first_name=first_name,
+                        last_name=last_name,
+                        date_of_birth=date_of_birth,
+                    )
                 )
             )
 
             completed_at = (
-                current_time if result.status is not KycVerificationStatus.PENDING else None
+                current_time
+                if result.status
+                in {
+                    KycVerificationStatus.VERIFIED,
+                    KycVerificationStatus.REJECTED,
+                    KycVerificationStatus.REQUIRES_REVIEW,
+                }
+                else None
             )
             verification = await uow.kyc_verifications.add(
                 KycVerification(
@@ -132,6 +141,14 @@ class KycService:
                     verification_id=verification.id,
                     id_type=id_type.value,
                     provider=result.provider.value,
+                )
+            elif result.status is KycVerificationStatus.REQUIRES_REVIEW:
+                await uow.users.update(
+                    replace(
+                        user,
+                        kyc_status=KycStatus.REQUIRES_REVIEW,
+                        updated_at=current_time,
+                    )
                 )
             elif result.status is KycVerificationStatus.REJECTED:
                 await uow.users.update(
@@ -190,11 +207,7 @@ class KycService:
                 )
                 updated = await self._apply_provider_result(uow, verification, result)
                 if (
-                    updated.status
-                    in {
-                        KycVerificationStatus.VERIFIED,
-                        KycVerificationStatus.REJECTED,
-                    }
+                    updated.status is not KycVerificationStatus.PENDING
                     and verification.status is KycVerificationStatus.PENDING
                 ):
                     completed += 1
@@ -210,6 +223,7 @@ class KycService:
         result: KycProviderResult,
     ) -> KycVerification:
         """Apply a provider result to a KYC verification idempotently."""
+        result = self._apply_decision_policy(result)
         if verification.status in {
             KycVerificationStatus.VERIFIED,
             KycVerificationStatus.REJECTED,
@@ -231,6 +245,7 @@ class KycService:
                 in {
                     KycVerificationStatus.VERIFIED,
                     KycVerificationStatus.REJECTED,
+                    KycVerificationStatus.REQUIRES_REVIEW,
                 }
                 else verification.completed_at,
                 updated_at=current_time,
@@ -253,6 +268,14 @@ class KycService:
                 id_type=updated.id_type.value,
                 provider=updated.provider.value,
             )
+        elif result.status is KycVerificationStatus.REQUIRES_REVIEW:
+            await uow.users.update(
+                replace(
+                    user,
+                    kyc_status=KycStatus.REQUIRES_REVIEW,
+                    updated_at=current_time,
+                )
+            )
         elif result.status is KycVerificationStatus.REJECTED:
             await uow.users.update(
                 replace(
@@ -271,6 +294,55 @@ class KycService:
             )
 
         return updated
+
+    @staticmethod
+    def _apply_decision_policy(result: KycProviderResult) -> KycProviderResult:
+        """Apply internal KYC decision rules on top of provider output."""
+        if result.status is not KycVerificationStatus.VERIFIED:
+            return result
+
+        required_matches = {
+            "first_name": KycService._match_flag(
+                result.field_match_summary,
+                "first_name",
+                "firstName",
+            ),
+            "last_name": KycService._match_flag(
+                result.field_match_summary,
+                "last_name",
+                "lastName",
+            ),
+            "date_of_birth": KycService._match_flag(
+                result.field_match_summary,
+                "date_of_birth",
+                "dateOfBirth",
+            ),
+        }
+        all_required_match = all(value is True for value in required_matches.values())
+        if all_required_match:
+            return result
+
+        return replace(
+            result,
+            status=KycVerificationStatus.REQUIRES_REVIEW,
+            field_match_summary={
+                **result.field_match_summary,
+                "policy": {
+                    "decision": KycVerificationStatus.REQUIRES_REVIEW.value,
+                    "reason": "required_identity_fields_incomplete",
+                    "required_matches": required_matches,
+                },
+            },
+        )
+
+    @staticmethod
+    def _match_flag(summary: dict[str, object], *keys: str) -> bool | None:
+        """Return the first explicit boolean match flag found for a field."""
+        for key in keys:
+            value = summary.get(key)
+            if isinstance(value, bool):
+                return value
+        return None
 
 
 def get_kyc_service() -> KycService:

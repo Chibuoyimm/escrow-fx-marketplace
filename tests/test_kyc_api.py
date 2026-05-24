@@ -51,7 +51,79 @@ class PendingThenVerifiedProvider:
             provider_reference_id=provider_reference_id,
             status=KycVerificationStatus.VERIFIED,
             provider_status="verified",
-            field_match_summary={"id_type": id_type.value, "first_name": True},
+            field_match_summary={
+                "id_type": id_type.value,
+                "first_name": True,
+                "last_name": True,
+                "date_of_birth": True,
+            },
+            rejection_reason=None,
+        )
+
+
+class PartialMatchVerifiedProvider:
+    """Provider test double that returns verified with incomplete match coverage."""
+
+    async def verify_identity(self, request: KycProviderRequest) -> KycProviderResult:
+        return KycProviderResult(
+            provider=KycProvider.LOCAL,
+            provider_reference_id="partial-match-reference",
+            status=KycVerificationStatus.VERIFIED,
+            provider_status="verified",
+            field_match_summary={
+                "id_type": request.id_type.value,
+                "first_name": True,
+            },
+            rejection_reason=None,
+        )
+
+    async def retrieve_identity(
+        self,
+        *,
+        provider_reference_id: str,
+        id_type: KycIdType,
+    ) -> KycProviderResult:
+        return KycProviderResult(
+            provider=KycProvider.LOCAL,
+            provider_reference_id=provider_reference_id,
+            status=KycVerificationStatus.VERIFIED,
+            provider_status="verified",
+            field_match_summary={
+                "id_type": id_type.value,
+                "first_name": True,
+            },
+            rejection_reason=None,
+        )
+
+
+class PendingThenPartialMatchProvider:
+    """Provider test double that resolves pending checks into review."""
+
+    async def verify_identity(self, request: KycProviderRequest) -> KycProviderResult:
+        return KycProviderResult(
+            provider=KycProvider.LOCAL,
+            provider_reference_id="pending-review-reference",
+            status=KycVerificationStatus.PENDING,
+            provider_status="pending",
+            field_match_summary={"id_type": request.id_type.value},
+            rejection_reason=None,
+        )
+
+    async def retrieve_identity(
+        self,
+        *,
+        provider_reference_id: str,
+        id_type: KycIdType,
+    ) -> KycProviderResult:
+        return KycProviderResult(
+            provider=KycProvider.LOCAL,
+            provider_reference_id=provider_reference_id,
+            status=KycVerificationStatus.VERIFIED,
+            provider_status="verified",
+            field_match_summary={
+                "id_type": id_type.value,
+                "first_name": True,
+            },
             rejection_reason=None,
         )
 
@@ -194,6 +266,55 @@ async def test_submit_kyc_verifies_user_without_storing_raw_identifier(
         "user.kyc_submitted",
         "user.kyc_verified",
     }
+
+
+async def test_submit_kyc_routes_incomplete_verified_matches_to_requires_review(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    security: SecurityService,
+) -> None:
+    await create_pending_kyc_user(session_factory, security)
+    review_service = KycService(
+        uow_factory=lambda: SqlAlchemyUnitOfWork(session_factory),
+        provider=PartialMatchVerifiedProvider(),
+    )
+    app.dependency_overrides[get_kyc_service] = lambda: review_service
+    token = await login(client)
+
+    response = await client.post(
+        "/api/v1/kyc/submit",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "id_type": "bvn",
+            "id_number": "22222222221",
+            "first_name": "Chibuoyim",
+            "last_name": "Onuigwe",
+            "date_of_birth": "1997-05-16",
+            "subject_consent": True,
+        },
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "requires_review"
+    assert body["field_match_summary"]["policy"]["decision"] == "requires_review"
+    assert body["field_match_summary"]["policy"]["required_matches"] == {
+        "first_name": True,
+        "last_name": None,
+        "date_of_birth": None,
+    }
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        user = await uow.users.get_by_email("kyc-user@example.com")
+        verification = await uow.kyc_verifications.get_latest_for_user(user.id)
+    assert user.kyc_status is KycStatus.REQUIRES_REVIEW
+    assert verification.status is KycVerificationStatus.REQUIRES_REVIEW
+    assert verification.completed_at is not None
+
+    async with session_factory() as session:
+        event_result = await session.execute(select(OutboxEventModel))
+        events = event_result.scalars().all()
+    assert [event.event_type for event in events] == ["user.kyc_submitted"]
 
 
 async def test_submit_kyc_rejects_missing_subject_consent(
@@ -355,6 +476,44 @@ async def test_reconcile_pending_kyc_updates_final_status(
     ]
 
 
+async def test_reconcile_pending_kyc_routes_incomplete_verified_matches_to_review(
+    session_factory: async_sessionmaker[AsyncSession],
+    security: SecurityService,
+) -> None:
+    await create_pending_kyc_user(session_factory, security)
+    service = KycService(
+        uow_factory=lambda: SqlAlchemyUnitOfWork(session_factory),
+        provider=PendingThenPartialMatchProvider(),
+    )
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        user = await uow.users.get_by_email("kyc-user@example.com")
+
+    verification = await service.submit_identity_check(
+        user_id=user.id,
+        id_type=KycIdType.BVN,
+        id_number="22222222221",
+        first_name="Chibuoyim",
+        last_name="Onuigwe",
+        date_of_birth=date(1997, 5, 16),
+        subject_consent=True,
+    )
+
+    assert verification.status is KycVerificationStatus.PENDING
+
+    completed = await service.reconcile_pending()
+
+    assert completed == 1
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        updated_user = await uow.users.get(user.id)
+        updated_verification = await uow.kyc_verifications.get(verification.id)
+
+    assert updated_user.kyc_status is KycStatus.REQUIRES_REVIEW
+    assert updated_verification.status is KycVerificationStatus.REQUIRES_REVIEW
+    assert updated_verification.completed_at is not None
+    assert updated_verification.field_match_summary["policy"]["decision"] == "requires_review"
+
+
 async def test_reconcile_pending_kyc_noops_when_provider_still_pending(
     session_factory: async_sessionmaker[AsyncSession],
     security: SecurityService,
@@ -426,7 +585,13 @@ async def test_youverify_webhook_completes_pending_kyc(
             "data": {
                 "id": "pending-reference",
                 "status": "verified",
-                "validation": {"matches": {"firstName": True}},
+                "validation": {
+                    "matches": {
+                        "firstName": True,
+                        "lastName": True,
+                        "dateOfBirth": True,
+                    }
+                },
             },
         },
         separators=(",", ":"),
