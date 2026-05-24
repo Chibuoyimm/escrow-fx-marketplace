@@ -35,6 +35,9 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     password_reset_token_columns = {
         column["name"] for column in inspector.get_columns("password_reset_tokens")
     }
+    kyc_verification_columns = {
+        column["name"] for column in inspector.get_columns("kyc_verifications")
+    }
     exchange_request_columns = {
         column["name"] for column in inspector.get_columns("exchange_requests")
     }
@@ -52,12 +55,16 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     assert "outbox_events" in inspector.get_table_names()
     assert "email_verification_tokens" in inspector.get_table_names()
     assert "password_reset_tokens" in inspector.get_table_names()
+    assert "kyc_verifications" in inspector.get_table_names()
     assert "password_hash" in user_columns
     assert "email_verified_at" in user_columns
     assert "token_hash" in email_verification_token_columns
     assert "consumed_at" in email_verification_token_columns
     assert "token_hash" in password_reset_token_columns
     assert "consumed_at" in password_reset_token_columns
+    assert "identifier_hash" in kyc_verification_columns
+    assert "masked_identifier" in kyc_verification_columns
+    assert "provider_reference_id" in kyc_verification_columns
     assert "expires_at" in exchange_request_columns
     assert "offered_rate" in exchange_offer_columns
     assert "accepted_offer_id" in trade_contract_columns

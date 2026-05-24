@@ -27,6 +27,30 @@ class KycStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class KycProvider(StrEnum):
+    """Supported KYC verification providers."""
+
+    LOCAL = "local"
+    YOUVERIFY = "youverify"
+
+
+class KycIdType(StrEnum):
+    """Supported identity document or number types for KYC."""
+
+    BVN = "bvn"
+    NIN = "nin"
+    VNIN = "vnin"
+
+
+class KycVerificationStatus(StrEnum):
+    """Lifecycle states for a provider-backed KYC verification attempt."""
+
+    PENDING = "pending"
+    VERIFIED = "verified"
+    REJECTED = "rejected"
+    REQUIRES_REVIEW = "requires_review"
+
+
 class RiskLevel(StrEnum):
     """Risk classifications."""
 

@@ -22,6 +22,7 @@ from app.domain.entities import (
     ExchangeOfferDetails,
     ExchangeRequest,
     ExchangeRequestDetails,
+    KycVerification,
     OutboxEvent,
     PasswordResetToken,
     TradeContract,
@@ -33,6 +34,7 @@ from app.domain.enums import (
     CurrencyStatus,
     ExchangeOfferStatus,
     ExchangeRequestStatus,
+    KycVerificationStatus,
     OutboxEventStatus,
     RailStatus,
     TradeContractStatus,
@@ -45,6 +47,7 @@ from app.models.currency import CurrencyModel
 from app.models.email_verification_token import EmailVerificationTokenModel
 from app.models.exchange_offer import ExchangeOfferModel
 from app.models.exchange_request import ExchangeRequestModel
+from app.models.kyc_verification import KycVerificationModel
 from app.models.outbox_event import OutboxEventModel
 from app.models.password_reset_token import PasswordResetTokenModel
 from app.models.trade_contract import TradeContractModel
@@ -56,6 +59,7 @@ from app.repositories.protocols import (
     EmailVerificationTokenRepositoryProtocol,
     ExchangeOfferRepositoryProtocol,
     ExchangeRequestRepositoryProtocol,
+    KycVerificationRepositoryProtocol,
     OutboxEventRepositoryProtocol,
     PasswordResetTokenRepositoryProtocol,
     TradeContractRepositoryProtocol,
@@ -229,6 +233,107 @@ class SqlAlchemyPasswordResetTokenRepository(
         model.updated_at = now
 
         await self._flush_or_raise_conflict("That password reset token could not be updated.")
+        return model.to_domain()
+
+
+class SqlAlchemyKycVerificationRepository(
+    SqlAlchemyRepository,
+    KycVerificationRepositoryProtocol,
+):
+    """KYC verification repository implementation."""
+
+    async def add(self, verification: KycVerification) -> KycVerification:
+        model = KycVerificationModel(
+            id=verification.id,
+            user_id=verification.user_id,
+            provider=verification.provider,
+            provider_reference_id=verification.provider_reference_id,
+            id_type=verification.id_type,
+            masked_identifier=verification.masked_identifier,
+            identifier_hash=verification.identifier_hash,
+            status=verification.status,
+            provider_status=verification.provider_status,
+            field_match_summary=verification.field_match_summary,
+            rejection_reason=verification.rejection_reason,
+            consented_at=verification.consented_at,
+            submitted_at=verification.submitted_at,
+            completed_at=verification.completed_at,
+            created_at=verification.created_at,
+            updated_at=verification.updated_at,
+        )
+        self.session.add(model)
+        await self._flush_or_raise_conflict("That KYC verification could not be saved.")
+        return model.to_domain()
+
+    async def get(self, verification_id: UUID) -> KycVerification:
+        model = await self.session.get(KycVerificationModel, verification_id)
+        if model is None:
+            raise NotFoundError(f"KYC verification '{verification_id}' was not found.")
+        return model.to_domain()
+
+    async def get_latest_for_user(self, user_id: UUID) -> KycVerification:
+        statement: Select[tuple[KycVerificationModel]] = (
+            select(KycVerificationModel)
+            .where(KycVerificationModel.user_id == user_id)
+            .order_by(KycVerificationModel.created_at.desc())
+            .limit(1)
+        )
+        result = await self.session.execute(statement)
+        model = result.scalar_one_or_none()
+        if model is None:
+            raise NotFoundError(f"KYC verification for user '{user_id}' was not found.")
+        return model.to_domain()
+
+    async def get_by_provider_reference(
+        self,
+        provider_reference_id: str,
+    ) -> KycVerification:
+        statement: Select[tuple[KycVerificationModel]] = select(KycVerificationModel).where(
+            KycVerificationModel.provider_reference_id == provider_reference_id
+        )
+        result = await self.session.execute(statement)
+        model = result.scalar_one_or_none()
+        if model is None:
+            raise NotFoundError(
+                f"KYC verification with provider reference '{provider_reference_id}' was not found."
+            )
+        return model.to_domain()
+
+    async def list_by_status(
+        self,
+        status: KycVerificationStatus,
+        *,
+        limit: int,
+    ) -> list[KycVerification]:
+        statement: Select[tuple[KycVerificationModel]] = (
+            select(KycVerificationModel)
+            .where(KycVerificationModel.status == status)
+            .order_by(KycVerificationModel.submitted_at.asc())
+            .limit(limit)
+        )
+        result = await self.session.execute(statement)
+        return [model.to_domain() for model in result.scalars().all()]
+
+    async def update(self, verification: KycVerification) -> KycVerification:
+        model = await self.session.get(KycVerificationModel, verification.id)
+        if model is None:
+            raise NotFoundError(f"KYC verification '{verification.id}' was not found.")
+
+        model.provider = verification.provider
+        model.provider_reference_id = verification.provider_reference_id
+        model.id_type = verification.id_type
+        model.masked_identifier = verification.masked_identifier
+        model.identifier_hash = verification.identifier_hash
+        model.status = verification.status
+        model.provider_status = verification.provider_status
+        model.field_match_summary = verification.field_match_summary
+        model.rejection_reason = verification.rejection_reason
+        model.consented_at = verification.consented_at
+        model.submitted_at = verification.submitted_at
+        model.completed_at = verification.completed_at
+        model.updated_at = verification.updated_at
+
+        await self._flush_or_raise_conflict("That KYC verification could not be updated.")
         return model.to_domain()
 
 

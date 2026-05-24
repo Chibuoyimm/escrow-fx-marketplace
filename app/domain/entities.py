@@ -14,7 +14,10 @@ from app.domain.enums import (
     ExchangeOfferStatus,
     ExchangeRequestStatus,
     FlowType,
+    KycIdType,
+    KycProvider,
     KycStatus,
+    KycVerificationStatus,
     OutboxEventStatus,
     RailStatus,
     RiskLevel,
@@ -64,6 +67,28 @@ class PasswordResetToken:
     token_hash: str
     expires_at: datetime
     consumed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class KycVerification:
+    """A provider-backed KYC verification attempt."""
+
+    id: UUID
+    user_id: UUID
+    provider: KycProvider
+    provider_reference_id: str
+    id_type: KycIdType
+    masked_identifier: str
+    identifier_hash: str
+    status: KycVerificationStatus
+    provider_status: str
+    field_match_summary: dict[str, Any]
+    rejection_reason: str | None
+    consented_at: datetime
+    submitted_at: datetime
+    completed_at: datetime | None
     created_at: datetime
     updated_at: datetime
 

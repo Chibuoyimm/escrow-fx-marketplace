@@ -158,6 +158,77 @@ class OutboxEventPublisher:
             },
         )
 
+    async def user_kyc_submitted(
+        self,
+        uow: AbstractUnitOfWork,
+        *,
+        user_id: UUID,
+        verification_id: UUID,
+        id_type: str,
+        provider: str,
+    ) -> OutboxEvent:
+        return await self._add(
+            uow,
+            event_type="user.kyc_submitted",
+            aggregate_type="kyc_verification",
+            aggregate_id=verification_id,
+            recipient_user_id=user_id,
+            payload={
+                "user_id": str(user_id),
+                "kyc_verification_id": str(verification_id),
+                "id_type": id_type,
+                "provider": provider,
+            },
+        )
+
+    async def user_kyc_verified(
+        self,
+        uow: AbstractUnitOfWork,
+        *,
+        user_id: UUID,
+        verification_id: UUID,
+        id_type: str,
+        provider: str,
+    ) -> OutboxEvent:
+        return await self._add(
+            uow,
+            event_type="user.kyc_verified",
+            aggregate_type="kyc_verification",
+            aggregate_id=verification_id,
+            recipient_user_id=user_id,
+            payload={
+                "user_id": str(user_id),
+                "kyc_verification_id": str(verification_id),
+                "id_type": id_type,
+                "provider": provider,
+            },
+        )
+
+    async def user_kyc_rejected(
+        self,
+        uow: AbstractUnitOfWork,
+        *,
+        user_id: UUID,
+        verification_id: UUID,
+        id_type: str,
+        provider: str,
+        reason: str,
+    ) -> OutboxEvent:
+        return await self._add(
+            uow,
+            event_type="user.kyc_rejected",
+            aggregate_type="kyc_verification",
+            aggregate_id=verification_id,
+            recipient_user_id=user_id,
+            payload={
+                "user_id": str(user_id),
+                "kyc_verification_id": str(verification_id),
+                "id_type": id_type,
+                "provider": provider,
+                "reason": reason,
+            },
+        )
+
     async def exchange_request_created(
         self,
         uow: AbstractUnitOfWork,

@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     notification_public_base_url: str = "http://localhost:8000"
     knock_api_key: str | None = None
     knock_branch: str | None = None
+    kyc_provider: str = "local"
+    kyc_reconciliation_batch_size: int = 50
+    youverify_base_url: str = "https://api.youverify.co"
+    youverify_api_key: str | None = None
+    youverify_bvn_endpoint: str = "/v2/api/identity/ng/bvn"
     jwt_issuer: str = "escrow-fx-marketplace"
 
     model_config = SettingsConfigDict(

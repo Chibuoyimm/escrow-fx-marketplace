@@ -36,6 +36,7 @@ Near-term backend priorities:
 - continue account/auth hardening where useful
 - continue marketplace lifecycle work before funding is introduced
 - keep notification workflows aligned with new business events
+- keep KYC provider integration flexible until Youverify account access confirms exact products and pricing
 - update this file when a decision becomes project guidance rather than a one-off implementation detail
 
 Funding, escrow legs, ledgers, payout rails, and payment webhooks remain deferred until explicitly picked up.
@@ -64,6 +65,7 @@ make db-reset
 make migrate
 make seed-reference-data
 make expire-marketplace
+make reconcile-kyc
 make dispatch-notifications
 make run
 ```
@@ -109,6 +111,20 @@ Important decisions:
 - Change password requires bearer auth plus the current password.
 
 Admin/bootstrap-created users are marked email verified automatically.
+
+## KYC Decisions
+
+Nigeria KYC has a provider-ready backend foundation.
+
+- Current endpoints are `POST /api/v1/kyc/submit` and `GET /api/v1/kyc/status`.
+- Supported first-pass ID types are `BVN`, `NIN`, and `VNIN`.
+- Raw BVN/NIN/vNIN values must not be stored long-term.
+- Store masked identifiers, identifier hashes, provider references, status, and audit timestamps.
+- `APP_KYC_PROVIDER=local` is the default until Youverify account access is available.
+- Do not hard-code premium BVN assumptions into service or domain code.
+- Keep Youverify endpoint/version details isolated in `app/integrations/youverify.py`.
+- If Youverify offers a cheaper basic BVN endpoint, swap it in through configuration or the integration layer.
+- Pending KYC attempts should complete through provider webhooks eventually, with `make reconcile-kyc` as the polling fallback.
 
 ## Marketplace Decisions
 
@@ -200,7 +216,7 @@ Do not rely on live Knock/Resend/Gmail tests as the only coverage. They are smok
 
 Known deferred work:
 
-- KYC provider integration
+- live Youverify integration after account access
 - funding instructions
 - escrow legs
 - payment webhooks

@@ -16,6 +16,7 @@ from app.domain.entities import (
     ExchangeOfferDetails,
     ExchangeRequest,
     ExchangeRequestDetails,
+    KycVerification,
     OutboxEvent,
     PasswordResetToken,
     TradeContract,
@@ -25,6 +26,7 @@ from app.domain.entities import (
 from app.domain.enums import (
     ExchangeOfferStatus,
     ExchangeRequestStatus,
+    KycVerificationStatus,
     OutboxEventStatus,
     TradeContractStatus,
     UserStatus,
@@ -85,6 +87,42 @@ class PasswordResetTokenRepositoryProtocol(ABC):
     @abstractmethod
     async def mark_consumed(self, token_id: UUID, now: datetime) -> PasswordResetToken:
         """Mark a password reset token as consumed."""
+
+
+class KycVerificationRepositoryProtocol(ABC):
+    """KYC verification repository contract."""
+
+    @abstractmethod
+    async def add(self, verification: KycVerification) -> KycVerification:
+        """Persist a KYC verification attempt."""
+
+    @abstractmethod
+    async def get(self, verification_id: UUID) -> KycVerification:
+        """Fetch a KYC verification attempt by identifier."""
+
+    @abstractmethod
+    async def get_latest_for_user(self, user_id: UUID) -> KycVerification:
+        """Fetch the latest KYC verification attempt for a user."""
+
+    @abstractmethod
+    async def get_by_provider_reference(
+        self,
+        provider_reference_id: str,
+    ) -> KycVerification:
+        """Fetch a KYC verification attempt by provider reference."""
+
+    @abstractmethod
+    async def list_by_status(
+        self,
+        status: KycVerificationStatus,
+        *,
+        limit: int,
+    ) -> list[KycVerification]:
+        """List KYC verification attempts by status."""
+
+    @abstractmethod
+    async def update(self, verification: KycVerification) -> KycVerification:
+        """Persist changes to an existing KYC verification attempt."""
 
 
 class CurrencyRepositoryProtocol(ABC):

@@ -118,6 +118,26 @@ token from the URL and calls `POST /api/v1/auth/verify-email`.
 Set `APP_PASSWORD_RESET_FRONTEND_URL` to the frontend page that reads the reset
 token from the URL and calls `POST /api/v1/auth/reset-password`.
 
+Nigeria KYC has a provider-ready backend foundation:
+
+```bash
+POST /api/v1/kyc/submit
+GET /api/v1/kyc/status
+```
+
+The default `APP_KYC_PROVIDER="local"` mode is deterministic and is intended for
+local/dev testing while Youverify account access is pending. Set
+`APP_KYC_PROVIDER="youverify"` plus `APP_YOUVERIFY_API_KEY` when real provider
+access is available. The integration is intentionally configured through
+provider-neutral service code so the BVN endpoint can be swapped if Youverify
+offers a cheaper non-premium BVN product.
+
+Reconcile pending provider KYC checks with:
+
+```bash
+make reconcile-kyc
+```
+
 Seed reference currencies and corridors with:
 
 ```bash
