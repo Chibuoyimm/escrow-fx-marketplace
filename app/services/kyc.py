@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime, timedelta
 from hashlib import sha256
 from uuid import UUID, uuid4
 
 from app.domain.entities import KycVerification
 from app.domain.enums import KycIdType, KycStatus, KycVerificationStatus, UserStatus
-from app.domain.exceptions import InvariantViolationError, PreconditionFailedError
+from app.domain.exceptions import InvariantViolationError, NotFoundError, PreconditionFailedError
 from app.infrastructure.config import settings
 from app.infrastructure.database.unit_of_work import AbstractUnitOfWork
 from app.integrations.youverify import (
@@ -19,7 +19,7 @@ from app.integrations.youverify import (
     YouverifyKycProvider,
     build_kyc_provider,
 )
-from app.services._shared import UnitOfWorkFactory, build_uow, utc_now
+from app.services._shared import UnitOfWorkFactory, as_utc, build_uow, utc_now
 from app.services.outbox import OutboxEventPublisher
 
 
@@ -74,6 +74,11 @@ class KycService:
                 raise InvariantViolationError(
                     "Nigeria KYC is currently supported for NG users only."
                 )
+            if user.kyc_status is KycStatus.VERIFIED:
+                raise PreconditionFailedError("Your KYC has already been verified.")
+            if user.kyc_status is KycStatus.REQUIRES_REVIEW:
+                raise PreconditionFailedError("Your KYC submission is already under review.")
+            await self._enforce_submission_controls(uow, user_id=user.id, now=current_time)
 
             result = self._apply_decision_policy(
                 await self._provider.verify_identity(
@@ -415,6 +420,41 @@ class KycService:
             )
 
         return updated
+
+    async def _enforce_submission_controls(
+        self,
+        uow: AbstractUnitOfWork,
+        *,
+        user_id: UUID,
+        now: datetime,
+    ) -> None:
+        """Block rapid or excessive repeated KYC submissions."""
+        try:
+            latest = await uow.kyc_verifications.get_latest_for_user(user_id)
+        except NotFoundError:
+            latest = None
+
+        cooldown_minutes = max(settings.kyc_submission_cooldown_minutes, 0)
+        if latest is not None and cooldown_minutes > 0:
+            cooldown_threshold = now - timedelta(minutes=cooldown_minutes)
+            if as_utc(latest.submitted_at) >= cooldown_threshold:
+                raise PreconditionFailedError("Please wait before submitting another KYC attempt.")
+
+        max_attempts = max(settings.kyc_max_attempts_per_window, 0)
+        window_hours = max(settings.kyc_attempt_window_hours, 0)
+        if max_attempts <= 0 or window_hours <= 0:
+            return
+
+        window_start = now - timedelta(hours=window_hours)
+        recent_attempts = await uow.kyc_verifications.list_submitted_since(
+            user_id=user_id,
+            since=window_start,
+            limit=max_attempts,
+        )
+        if len(recent_attempts) >= max_attempts:
+            raise PreconditionFailedError(
+                "You have reached the KYC attempt limit for now. Please try again later."
+            )
 
     @staticmethod
     def _apply_decision_policy(result: KycProviderResult) -> KycProviderResult:

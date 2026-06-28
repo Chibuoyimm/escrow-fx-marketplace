@@ -314,6 +314,25 @@ class SqlAlchemyKycVerificationRepository(
         result = await self.session.execute(statement)
         return [model.to_domain() for model in result.scalars().all()]
 
+    async def list_submitted_since(
+        self,
+        *,
+        user_id: UUID,
+        since: datetime,
+        limit: int,
+    ) -> list[KycVerification]:
+        statement: Select[tuple[KycVerificationModel]] = (
+            select(KycVerificationModel)
+            .where(
+                KycVerificationModel.user_id == user_id,
+                KycVerificationModel.submitted_at >= since,
+            )
+            .order_by(KycVerificationModel.submitted_at.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(statement)
+        return [model.to_domain() for model in result.scalars().all()]
+
     async def list_admin(
         self,
         status: KycVerificationStatus | None = None,

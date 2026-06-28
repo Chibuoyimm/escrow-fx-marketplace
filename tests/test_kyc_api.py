@@ -4,14 +4,16 @@ import hmac
 import json
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
+from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.domain.entities import KycVerification
 from app.domain.enums import KycIdType, KycProvider, KycStatus, KycVerificationStatus
 from app.infrastructure.config import settings
 from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
@@ -202,16 +204,53 @@ async def create_pending_kyc_user(
     *,
     email: str = "kyc-user@example.com",
     country: str = "NG",
+    kyc_status: KycStatus = KycStatus.PENDING,
 ) -> None:
     user = build_user(
         email=email,
         password_hash=security.hash_password("ChangeMe123!"),
-        kyc_status=KycStatus.PENDING,
+        kyc_status=kyc_status,
     )
     user = replace(user, country=country)
     async with SqlAlchemyUnitOfWork(session_factory) as uow:
         await uow.users.add(user)
         await uow.commit()
+
+
+async def create_kyc_attempt(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    email: str = "kyc-user@example.com",
+    status: KycVerificationStatus = KycVerificationStatus.REJECTED,
+    submitted_at: datetime | None = None,
+) -> KycVerification:
+    current_time = submitted_at or datetime.now(UTC)
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        user = await uow.users.get_by_email(email)
+        verification = await uow.kyc_verifications.add(
+            KycVerification(
+                id=uuid4(),
+                user_id=user.id,
+                provider=KycProvider.LOCAL,
+                provider_reference_id=f"seeded-{uuid4()}",
+                id_type=KycIdType.BVN,
+                masked_identifier="22*****2221",
+                identifier_hash=f"seeded-hash-{uuid4()}",
+                status=status,
+                provider_status=status.value,
+                field_match_summary={"id_type": "bvn"},
+                rejection_reason="Seeded rejection."
+                if status is KycVerificationStatus.REJECTED
+                else None,
+                consented_at=current_time,
+                submitted_at=current_time,
+                completed_at=current_time if status is not KycVerificationStatus.PENDING else None,
+                created_at=current_time,
+                updated_at=current_time,
+            )
+        )
+        await uow.commit()
+        return verification
 
 
 async def login(client: AsyncClient, *, email: str = "kyc-user@example.com") -> str:
@@ -431,6 +470,151 @@ async def test_submit_kyc_rejects_non_ng_users(
 
     assert response.status_code == 422
     assert response.json()["error_code"] == "invariant_violation"
+
+
+async def test_submit_kyc_blocks_verified_users(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    security: SecurityService,
+) -> None:
+    await create_pending_kyc_user(
+        session_factory,
+        security,
+        kyc_status=KycStatus.VERIFIED,
+    )
+    token = await login(client)
+
+    response = await client.post(
+        "/api/v1/kyc/submit",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "id_type": "bvn",
+            "id_number": "22222222221",
+            "first_name": "Chibuoyim",
+            "last_name": "Onuigwe",
+            "date_of_birth": "1997-05-16",
+            "subject_consent": True,
+        },
+    )
+
+    assert response.status_code == 412
+    assert response.json()["error_code"] == "precondition_failed"
+
+
+async def test_submit_kyc_blocks_users_with_review_pending(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    security: SecurityService,
+) -> None:
+    await create_pending_kyc_user(
+        session_factory,
+        security,
+        kyc_status=KycStatus.REQUIRES_REVIEW,
+    )
+    token = await login(client)
+
+    response = await client.post(
+        "/api/v1/kyc/submit",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "id_type": "bvn",
+            "id_number": "22222222221",
+            "first_name": "Chibuoyim",
+            "last_name": "Onuigwe",
+            "date_of_birth": "1997-05-16",
+            "subject_consent": True,
+        },
+    )
+
+    assert response.status_code == 412
+    assert response.json()["error_code"] == "precondition_failed"
+
+
+async def test_submit_kyc_enforces_cooldown_between_attempts(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    security: SecurityService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await create_pending_kyc_user(session_factory, security)
+    pending_service = KycService(
+        uow_factory=lambda: SqlAlchemyUnitOfWork(session_factory),
+        provider=PendingProvider(),
+    )
+    app.dependency_overrides[get_kyc_service] = lambda: pending_service
+    monkeypatch.setattr(settings, "kyc_submission_cooldown_minutes", 5)
+    token = await login(client)
+
+    first_response = await client.post(
+        "/api/v1/kyc/submit",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "id_type": "bvn",
+            "id_number": "22222222221",
+            "first_name": "Chibuoyim",
+            "last_name": "Onuigwe",
+            "date_of_birth": "1997-05-16",
+            "subject_consent": True,
+        },
+    )
+    second_response = await client.post(
+        "/api/v1/kyc/submit",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "id_type": "bvn",
+            "id_number": "22222222222",
+            "first_name": "Chibuoyim",
+            "last_name": "Onuigwe",
+            "date_of_birth": "1997-05-16",
+            "subject_consent": True,
+        },
+    )
+
+    assert first_response.status_code == 201
+    assert second_response.status_code == 412
+    assert second_response.json()["error_code"] == "precondition_failed"
+
+
+async def test_submit_kyc_enforces_attempt_limit_within_window(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    security: SecurityService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await create_pending_kyc_user(session_factory, security)
+    monkeypatch.setattr(settings, "kyc_submission_cooldown_minutes", 0)
+    monkeypatch.setattr(settings, "kyc_max_attempts_per_window", 3)
+    monkeypatch.setattr(settings, "kyc_attempt_window_hours", 24)
+    now = datetime.now(UTC)
+    await create_kyc_attempt(
+        session_factory,
+        submitted_at=now - timedelta(hours=2),
+    )
+    await create_kyc_attempt(
+        session_factory,
+        submitted_at=now - timedelta(hours=1),
+    )
+    await create_kyc_attempt(
+        session_factory,
+        submitted_at=now - timedelta(minutes=30),
+    )
+    token = await login(client)
+
+    response = await client.post(
+        "/api/v1/kyc/submit",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "id_type": "bvn",
+            "id_number": "22222222221",
+            "first_name": "Chibuoyim",
+            "last_name": "Onuigwe",
+            "date_of_birth": "1997-05-16",
+            "subject_consent": True,
+        },
+    )
+
+    assert response.status_code == 412
+    assert response.json()["error_code"] == "precondition_failed"
 
 
 async def test_reconcile_pending_kyc_updates_final_status(

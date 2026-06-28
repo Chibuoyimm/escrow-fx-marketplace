@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     knock_branch: str | None = None
     kyc_provider: str = "local"
     kyc_reconciliation_batch_size: int = 50
+    kyc_submission_cooldown_minutes: int = 1
+    kyc_max_attempts_per_window: int = 5
+    kyc_attempt_window_hours: int = 24
     youverify_base_url: str = "https://api.youverify.co"
     youverify_api_key: str | None = None
     youverify_webhook_secret: str | None = None

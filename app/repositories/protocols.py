@@ -121,6 +121,16 @@ class KycVerificationRepositoryProtocol(ABC):
         """List KYC verification attempts by status."""
 
     @abstractmethod
+    async def list_submitted_since(
+        self,
+        *,
+        user_id: UUID,
+        since: datetime,
+        limit: int,
+    ) -> list[KycVerification]:
+        """List a user's KYC attempts submitted since a point in time."""
+
+    @abstractmethod
     async def list_admin(
         self,
         status: KycVerificationStatus | None = None,
