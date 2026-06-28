@@ -115,6 +115,7 @@ class KycService:
                     status=result.status,
                     provider_status=result.provider_status,
                     field_match_summary=result.field_match_summary,
+                    review_events=[],
                     rejection_reason=result.rejection_reason,
                     consented_at=current_time,
                     submitted_at=current_time,
@@ -208,14 +209,13 @@ class KycService:
                     verification,
                     status=KycVerificationStatus.VERIFIED,
                     provider_status="approved_by_admin",
-                    field_match_summary={
-                        **verification.field_match_summary,
-                        "admin_review": {
-                            "decision": KycVerificationStatus.VERIFIED.value,
-                            "reviewer_user_id": str(reviewer_user_id),
-                            "reviewed_at": current_time.isoformat(),
-                        },
-                    },
+                    review_events=self._append_review_event(
+                        verification.review_events,
+                        event_type="decision",
+                        reviewer_user_id=reviewer_user_id,
+                        created_at=current_time,
+                        decision=KycVerificationStatus.VERIFIED.value,
+                    ),
                     completed_at=verification.completed_at or current_time,
                     updated_at=current_time,
                 )
@@ -234,6 +234,38 @@ class KycService:
                 verification_id=updated.id,
                 id_type=updated.id_type.value,
                 provider=updated.provider.value,
+            )
+            await uow.commit()
+            return updated
+
+    async def add_review_note(
+        self,
+        *,
+        verification_id: UUID,
+        reviewer_user_id: UUID,
+        note: str,
+    ) -> KycVerification:
+        """Add an internal note to a KYC verification under review."""
+        current_time = utc_now()
+        async with self._uow_factory() as uow:
+            verification = await uow.kyc_verifications.get(verification_id)
+            if verification.status is not KycVerificationStatus.REQUIRES_REVIEW:
+                raise PreconditionFailedError(
+                    "Only KYC verifications requiring review can receive review notes."
+                )
+
+            updated = await uow.kyc_verifications.update(
+                replace(
+                    verification,
+                    review_events=self._append_review_event(
+                        verification.review_events,
+                        event_type="note",
+                        reviewer_user_id=reviewer_user_id,
+                        created_at=current_time,
+                        note=note,
+                    ),
+                    updated_at=current_time,
+                )
             )
             await uow.commit()
             return updated
@@ -259,15 +291,14 @@ class KycService:
                     verification,
                     status=KycVerificationStatus.REJECTED,
                     provider_status="rejected_by_admin",
-                    field_match_summary={
-                        **verification.field_match_summary,
-                        "admin_review": {
-                            "decision": KycVerificationStatus.REJECTED.value,
-                            "reviewer_user_id": str(reviewer_user_id),
-                            "reviewed_at": current_time.isoformat(),
-                            "reason": reason,
-                        },
-                    },
+                    review_events=self._append_review_event(
+                        verification.review_events,
+                        event_type="decision",
+                        reviewer_user_id=reviewer_user_id,
+                        created_at=current_time,
+                        decision=KycVerificationStatus.REJECTED.value,
+                        reason=reason,
+                    ),
                     rejection_reason=reason,
                     completed_at=verification.completed_at or current_time,
                     updated_at=current_time,
@@ -514,6 +545,31 @@ class KycService:
             if isinstance(reason, str) and reason:
                 return reason
         return "kyc_requires_manual_review"
+
+    @staticmethod
+    def _append_review_event(
+        review_events: list[dict[str, object]],
+        *,
+        event_type: str,
+        reviewer_user_id: UUID,
+        created_at: datetime,
+        decision: str | None = None,
+        reason: str | None = None,
+        note: str | None = None,
+    ) -> list[dict[str, object]]:
+        """Append a structured review history event."""
+        event: dict[str, object] = {
+            "event_type": event_type,
+            "reviewer_user_id": str(reviewer_user_id),
+            "created_at": created_at.isoformat(),
+        }
+        if decision is not None:
+            event["decision"] = decision
+        if reason is not None:
+            event["reason"] = reason
+        if note is not None:
+            event["note"] = note
+        return [*review_events, event]
 
 
 def get_kyc_service() -> KycService:

@@ -254,6 +254,7 @@ class SqlAlchemyKycVerificationRepository(
             status=verification.status,
             provider_status=verification.provider_status,
             field_match_summary=verification.field_match_summary,
+            review_events=verification.review_events,
             rejection_reason=verification.rejection_reason,
             consented_at=verification.consented_at,
             submitted_at=verification.submitted_at,
@@ -358,6 +359,7 @@ class SqlAlchemyKycVerificationRepository(
         model.status = verification.status
         model.provider_status = verification.provider_status
         model.field_match_summary = verification.field_match_summary
+        model.review_events = verification.review_events
         model.rejection_reason = verification.rejection_reason
         model.consented_at = verification.consented_at
         model.submitted_at = verification.submitted_at

@@ -42,6 +42,7 @@ class KycVerificationResponse(BaseModel):
     status: KycVerificationStatus
     provider_status: str
     field_match_summary: dict[str, object]
+    review_events: list[KycReviewEventResponse]
     rejection_reason: str | None
     consented_at: datetime
     submitted_at: datetime
@@ -62,3 +63,28 @@ class AdminKycRejectRequest(BaseModel):
         if isinstance(value, str):
             return value.strip()
         return value
+
+
+class AdminKycReviewNoteRequest(BaseModel):
+    """Payload for adding an internal KYC review note."""
+
+    note: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("note", mode="before")
+    @classmethod
+    def strip_note(cls, value: object) -> object:
+        """Trim note text before validation."""
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+
+class KycReviewEventResponse(BaseModel):
+    """Structured admin review history for a KYC verification."""
+
+    event_type: str
+    reviewer_user_id: UUID
+    created_at: datetime
+    decision: str | None = None
+    reason: str | None = None
+    note: str | None = None

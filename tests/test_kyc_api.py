@@ -239,6 +239,7 @@ async def create_kyc_attempt(
                 status=status,
                 provider_status=status.value,
                 field_match_summary={"id_type": "bvn"},
+                review_events=[],
                 rejection_reason="Seeded rejection."
                 if status is KycVerificationStatus.REJECTED
                 else None,
@@ -349,6 +350,7 @@ async def test_submit_kyc_routes_incomplete_verified_matches_to_requires_review(
     assert user.kyc_status is KycStatus.REQUIRES_REVIEW
     assert verification.status is KycVerificationStatus.REQUIRES_REVIEW
     assert verification.completed_at is not None
+    assert verification.review_events == []
 
     async with session_factory() as session:
         event_result = await session.execute(select(OutboxEventModel))

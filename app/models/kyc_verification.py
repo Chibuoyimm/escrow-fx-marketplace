@@ -43,6 +43,7 @@ class KycVerificationModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     provider_status: Mapped[str] = mapped_column(String(64))
     field_match_summary: Mapped[dict[str, Any]] = mapped_column(JSON)
+    review_events: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     rejection_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
     consented_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -61,6 +62,7 @@ class KycVerificationModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             status=self.status,
             provider_status=self.provider_status,
             field_match_summary=self.field_match_summary,
+            review_events=self.review_events,
             rejection_reason=self.rejection_reason,
             consented_at=self.consented_at,
             submitted_at=self.submitted_at,

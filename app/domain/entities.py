@@ -85,6 +85,7 @@ class KycVerification:
     status: KycVerificationStatus
     provider_status: str
     field_match_summary: dict[str, Any]
+    review_events: list[dict[str, Any]]
     rejection_reason: str | None
     consented_at: datetime
     submitted_at: datetime

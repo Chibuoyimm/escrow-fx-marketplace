@@ -20,7 +20,11 @@ from app.domain.enums import (
 from app.schemas.auth import CurrentUserResponse
 from app.schemas.exchange_offer import ExchangeOfferResponse
 from app.schemas.exchange_request import ExchangeRequestResponse
-from app.schemas.kyc import AdminKycRejectRequest, KycVerificationResponse
+from app.schemas.kyc import (
+    AdminKycRejectRequest,
+    AdminKycReviewNoteRequest,
+    KycVerificationResponse,
+)
 from app.schemas.outbox import OutboxEventResponse
 from app.schemas.trade import TradeContractResponse
 from app.services.admin import AdminService, get_admin_service
@@ -129,6 +133,22 @@ async def approve_kyc_review(
     verification = await kyc_service.approve_review(
         verification_id=verification_id,
         reviewer_user_id=principal.user_id,
+    )
+    return KycVerificationResponse.model_validate(verification)
+
+
+@admin_router.post("/kyc/{verification_id}/notes", response_model=KycVerificationResponse)
+async def add_kyc_review_note(
+    verification_id: UUID,
+    payload: AdminKycReviewNoteRequest,
+    principal: AuthenticatedPrincipal = principal_dependency,
+    kyc_service: KycService = kyc_service_dependency,
+) -> KycVerificationResponse:
+    """Add an internal note to a KYC verification under review."""
+    verification = await kyc_service.add_review_note(
+        verification_id=verification_id,
+        reviewer_user_id=principal.user_id,
+        note=payload.note,
     )
     return KycVerificationResponse.model_validate(verification)
 

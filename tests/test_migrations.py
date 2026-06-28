@@ -65,6 +65,7 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     assert "identifier_hash" in kyc_verification_columns
     assert "masked_identifier" in kyc_verification_columns
     assert "provider_reference_id" in kyc_verification_columns
+    assert "review_events" in kyc_verification_columns
     assert "expires_at" in exchange_request_columns
     assert "offered_rate" in exchange_offer_columns
     assert "accepted_offer_id" in trade_contract_columns

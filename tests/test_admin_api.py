@@ -147,6 +147,7 @@ async def seed_review_kyc_verification(
                         },
                     },
                 },
+                review_events=[],
                 rejection_reason=None,
                 consented_at=now,
                 submitted_at=now,
@@ -438,6 +439,40 @@ async def test_admin_lists_and_gets_kyc_verifications(
     assert get_response.status_code == 200
     assert get_response.json()["id"] == verification_id
     assert get_response.json()["status"] == "requires_review"
+    assert get_response.json()["review_events"] == []
+
+
+async def test_admin_can_add_review_note(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    admin_headers, admin_user_id = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="note-kyc-admin@example.com",
+        role=UserRole.ADMIN,
+    )
+    _, verification_id = await seed_review_kyc_verification(session_factory)
+
+    response = await client.post(
+        f"/api/v1/admin/kyc/{verification_id}/notes",
+        headers=admin_headers,
+        json={"note": "Customer confirmed missing surname on the upstream record."},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "requires_review"
+    assert response.json()["review_events"] == [
+        {
+            "event_type": "note",
+            "reviewer_user_id": str(UUID(admin_user_id)),
+            "created_at": response.json()["review_events"][0]["created_at"],
+            "decision": None,
+            "reason": None,
+            "note": "Customer confirmed missing surname on the upstream record.",
+        }
+    ]
 
 
 async def test_admin_can_approve_review_kyc(
@@ -460,10 +495,16 @@ async def test_admin_can_approve_review_kyc(
 
     assert response.status_code == 200
     assert response.json()["status"] == "verified"
-    assert response.json()["field_match_summary"]["admin_review"]["decision"] == "verified"
-    assert response.json()["field_match_summary"]["admin_review"]["reviewer_user_id"] == str(
-        UUID(admin_user_id)
-    )
+    assert response.json()["review_events"] == [
+        {
+            "event_type": "decision",
+            "reviewer_user_id": str(UUID(admin_user_id)),
+            "created_at": response.json()["review_events"][0]["created_at"],
+            "decision": "verified",
+            "reason": None,
+            "note": None,
+        }
+    ]
 
     async with SqlAlchemyUnitOfWork(session_factory) as uow:
         user = await uow.users.get(UUID(user_id))
@@ -500,10 +541,16 @@ async def test_admin_can_reject_review_kyc(
     assert response.status_code == 200
     assert response.json()["status"] == "rejected"
     assert response.json()["rejection_reason"] == "Documents did not match the identity record."
-    assert response.json()["field_match_summary"]["admin_review"]["decision"] == "rejected"
-    assert response.json()["field_match_summary"]["admin_review"]["reviewer_user_id"] == str(
-        UUID(admin_user_id)
-    )
+    assert response.json()["review_events"] == [
+        {
+            "event_type": "decision",
+            "reviewer_user_id": str(UUID(admin_user_id)),
+            "created_at": response.json()["review_events"][0]["created_at"],
+            "decision": "rejected",
+            "reason": "Documents did not match the identity record.",
+            "note": None,
+        }
+    ]
 
     async with SqlAlchemyUnitOfWork(session_factory) as uow:
         user = await uow.users.get(UUID(user_id))
