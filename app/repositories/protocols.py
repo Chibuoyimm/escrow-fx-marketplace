@@ -8,6 +8,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from app.domain.entities import (
+    AccountAuditEvent,
     Corridor,
     CorridorDetails,
     CorridorRail,
@@ -47,6 +48,10 @@ class UserRepositoryProtocol(ABC):
         """Fetch a user by identifier."""
 
     @abstractmethod
+    async def get_for_update(self, user_id: UUID) -> User:
+        """Fetch a user while locking the row for a transactional mutation."""
+
+    @abstractmethod
     async def get_by_email(self, email: str) -> User:
         """Fetch a user by email address."""
 
@@ -69,6 +74,18 @@ class UserRepositoryProtocol(ABC):
         """List users with cursor pagination."""
 
 
+class AccountAuditEventRepositoryProtocol(ABC):
+    """Append-only account audit history contract."""
+
+    @abstractmethod
+    async def add(self, event: AccountAuditEvent) -> AccountAuditEvent:
+        """Persist an account audit event."""
+
+    @abstractmethod
+    async def list_for_subject(self, subject_user_id: UUID) -> list[AccountAuditEvent]:
+        """List account audit events for a subject user."""
+
+
 class EmailVerificationTokenRepositoryProtocol(ABC):
     """Email verification token repository contract."""
 
@@ -81,8 +98,12 @@ class EmailVerificationTokenRepositoryProtocol(ABC):
         """Fetch an email verification token by hashed token."""
 
     @abstractmethod
-    async def mark_consumed(self, token_id: UUID, now: datetime) -> EmailVerificationToken:
-        """Mark a token as consumed."""
+    async def consume(
+        self,
+        token_hash: str,
+        now: datetime,
+    ) -> EmailVerificationToken | None:
+        """Atomically consume an unexpired, unused email verification token."""
 
 
 class PasswordResetTokenRepositoryProtocol(ABC):
@@ -97,8 +118,12 @@ class PasswordResetTokenRepositoryProtocol(ABC):
         """Fetch a password reset token by hashed token."""
 
     @abstractmethod
-    async def mark_consumed(self, token_id: UUID, now: datetime) -> PasswordResetToken:
-        """Mark a password reset token as consumed."""
+    async def consume(
+        self,
+        token_hash: str,
+        now: datetime,
+    ) -> PasswordResetToken | None:
+        """Atomically consume an unexpired, unused password reset token."""
 
 
 class KycVerificationRepositoryProtocol(ABC):
@@ -111,6 +136,10 @@ class KycVerificationRepositoryProtocol(ABC):
     @abstractmethod
     async def get(self, verification_id: UUID) -> KycVerification:
         """Fetch a KYC verification attempt by identifier."""
+
+    @abstractmethod
+    async def get_for_update(self, verification_id: UUID) -> KycVerification:
+        """Fetch a KYC verification attempt while locking its row."""
 
     @abstractmethod
     async def get_latest_for_user(self, user_id: UUID) -> KycVerification:
@@ -297,6 +326,10 @@ class ExchangeRequestRepositoryProtocol(ABC):
         """Return whether a request already has a direct relisted successor."""
 
     @abstractmethod
+    async def has_actionable_for_creator(self, user_id: UUID, now: datetime) -> bool:
+        """Return whether a user owns a non-expired open or pending request."""
+
+    @abstractmethod
     async def list_board_details_page(
         self,
         viewer_user_id: UUID,
@@ -359,6 +392,10 @@ class ExchangeOfferRepositoryProtocol(ABC):
     @abstractmethod
     async def has_active_offer_for_request(self, request_id: UUID, user_id: UUID) -> bool:
         """Check whether a user already has an active offer on a request."""
+
+    @abstractmethod
+    async def has_active_for_user(self, user_id: UUID, now: datetime) -> bool:
+        """Return whether a user owns any non-expired active offer."""
 
     @abstractmethod
     async def get_visible_details(
@@ -454,6 +491,10 @@ class TradeContractRepositoryProtocol(ABC):
     async def cancel_due_unfunded(self, now: datetime) -> list[TradeContractDetails]:
         """Atomically cancel due trades and return only changed rows."""
 
+    @abstractmethod
+    async def has_non_terminal_for_participant(self, user_id: UUID) -> bool:
+        """Return whether a user participates in any non-terminal trade."""
+
 
 class OutboxEventRepositoryProtocol(ABC):
     """Outbox event repository contract."""
@@ -492,8 +533,14 @@ class OutboxEventRepositoryProtocol(ABC):
         """Claim due outbox events for dispatch."""
 
     @abstractmethod
-    async def mark_delivered(self, event_id: UUID, now: datetime) -> OutboxEvent:
-        """Mark an outbox event as delivered."""
+    async def mark_delivered(
+        self,
+        *,
+        event_id: UUID,
+        expected_processing_deadline: datetime,
+        now: datetime,
+    ) -> OutboxEvent | None:
+        """Finalize delivery only if this worker still owns the processing lease."""
 
     @abstractmethod
     async def mark_failed(
@@ -505,5 +552,6 @@ class OutboxEventRepositoryProtocol(ABC):
         last_error: str,
         next_attempt_at: datetime | None,
         now: datetime,
-    ) -> OutboxEvent:
-        """Mark an outbox event as failed and scheduled for retry."""
+        expected_processing_deadline: datetime,
+    ) -> OutboxEvent | None:
+        """Finalize failure only if this worker still owns the processing lease."""

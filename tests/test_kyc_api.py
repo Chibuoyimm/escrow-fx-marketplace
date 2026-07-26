@@ -813,6 +813,20 @@ async def test_youverify_webhook_completes_pending_kyc(
     assert verification.status is KycVerificationStatus.VERIFIED
     assert verification.completed_at is not None
 
+    duplicate_response = await client.post(
+        "/api/v1/webhooks/kyc/youverify",
+        content=raw_payload,
+        headers={
+            "content-type": "application/json",
+            "x-youverify-signature": signature,
+        },
+    )
+    assert duplicate_response.status_code == 200
+    async with session_factory() as session:
+        event_result = await session.execute(select(OutboxEventModel))
+        events = event_result.scalars().all()
+    assert [event.event_type for event in events].count("user.kyc_verified") == 1
+
 
 async def test_youverify_webhook_rejects_invalid_signature(
     client: AsyncClient,

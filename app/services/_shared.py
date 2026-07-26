@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from decimal import Decimal
+from uuid import UUID
 
+from app.domain.entities import User
 from app.infrastructure.database.base import utc_now as _db_utc_now
 from app.infrastructure.database.unit_of_work import (
     AbstractUnitOfWork,
@@ -18,10 +20,22 @@ __all__ = [
     "build_uow",
     "format_decimal",
     "format_display_datetime",
+    "lock_users_in_order",
     "utc_now",
 ]
 
 UnitOfWorkFactory = Callable[[], AbstractUnitOfWork]
+
+
+async def lock_users_in_order(
+    uow: AbstractUnitOfWork,
+    user_ids: Iterable[UUID],
+) -> dict[UUID, User]:
+    """Lock participant users in the canonical deterministic UUID order."""
+    users: dict[UUID, User] = {}
+    for user_id in sorted(set(user_ids), key=lambda value: value.int):
+        users[user_id] = await uow.users.get_for_update(user_id)
+    return users
 
 
 def utc_now() -> datetime:

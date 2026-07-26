@@ -9,8 +9,9 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.domain.entities import EmailVerificationToken, PasswordResetToken
+from app.domain.entities import AccountAuditEvent, EmailVerificationToken, PasswordResetToken
 from app.domain.enums import (
+    AccountAuditEventType,
     CorridorStatus,
     CurrencyStatus,
     ExchangeOfferStatus,
@@ -22,11 +23,13 @@ from app.domain.enums import (
 from app.domain.exceptions import ConflictError, InvariantViolationError, NotFoundError
 from app.domain.value_objects import Money, Rate
 from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
+from app.models.account_audit_event import AccountAuditEventModel
 from app.models.corridor import CorridorModel, CorridorRailModel
 from app.models.exchange_offer import ExchangeOfferModel
 from app.models.exchange_request import ExchangeRequestModel
 from app.models.trade_contract import TradeContractModel
 from app.repositories.sqlalchemy import (
+    SqlAlchemyAccountAuditEventRepository,
     SqlAlchemyCorridorRailRepository,
     SqlAlchemyCorridorRepository,
     SqlAlchemyCurrencyRepository,
@@ -63,6 +66,65 @@ async def test_user_repository_round_trips_users(session: AsyncSession) -> None:
 
 
 @pytest.mark.anyio
+async def test_account_audit_repository_round_trips_subject_history(
+    session: AsyncSession,
+) -> None:
+    user_repository = SqlAlchemyUserRepository(session)
+    repository = SqlAlchemyAccountAuditEventRepository(session)
+    user = await user_repository.add(build_user(email="audit-repository@example.com"))
+    occurred_at = datetime.now(UTC)
+    event = await repository.add(
+        AccountAuditEvent(
+            id=uuid4(),
+            subject_user_id=user.id,
+            actor_user_id=user.id,
+            event_type=AccountAuditEventType.PROFILE_UPDATED,
+            occurred_at=occurred_at,
+            metadata={"changed_fields": ["phone"]},
+        )
+    )
+
+    events = await repository.list_for_subject(user.id)
+
+    assert event.id == events[0].id
+    assert events[0].event_type is AccountAuditEventType.PROFILE_UPDATED
+    assert events[0].metadata == {"changed_fields": ["phone"]}
+
+
+@pytest.mark.anyio
+async def test_account_audit_model_rejects_orm_updates_and_deletes(
+    session: AsyncSession,
+) -> None:
+    user_repository = SqlAlchemyUserRepository(session)
+    repository = SqlAlchemyAccountAuditEventRepository(session)
+    user = await user_repository.add(build_user(email="immutable-audit@example.com"))
+    event = await repository.add(
+        AccountAuditEvent(
+            id=uuid4(),
+            subject_user_id=user.id,
+            actor_user_id=user.id,
+            event_type=AccountAuditEventType.PROFILE_UPDATED,
+            occurred_at=datetime.now(UTC),
+            metadata={"changed_fields": ["phone"]},
+        )
+    )
+    await session.commit()
+
+    model = await session.get(AccountAuditEventModel, event.id)
+    assert model is not None
+    model.event_type = AccountAuditEventType.SELF_DEACTIVATED
+    with pytest.raises(RuntimeError, match="append-only"):
+        await session.flush()
+    await session.rollback()
+
+    model = await session.get(AccountAuditEventModel, event.id)
+    assert model is not None
+    await session.delete(model)
+    with pytest.raises(RuntimeError, match="append-only"):
+        await session.flush()
+
+
+@pytest.mark.anyio
 async def test_email_verification_token_repository_round_trips_and_consumes(
     session: AsyncSession,
 ) -> None:
@@ -83,10 +145,26 @@ async def test_email_verification_token_repository_round_trips_and_consumes(
     )
 
     fetched = await repository.get_by_token_hash(token.token_hash)
-    consumed = await repository.mark_consumed(token.id, current_time)
+    consumed = await repository.consume(token.token_hash, current_time)
 
     assert fetched.id == token.id
-    assert consumed.consumed_at == current_time
+    assert consumed is not None
+    assert consumed.consumed_at is not None
+    assert consumed.consumed_at.replace(tzinfo=UTC) == current_time
+    assert await repository.consume(token.token_hash, current_time) is None
+
+    expired = await repository.add(
+        EmailVerificationToken(
+            id=uuid4(),
+            user_id=user.id,
+            token_hash="c" * 64,
+            expires_at=current_time - timedelta(seconds=1),
+            consumed_at=None,
+            created_at=current_time,
+            updated_at=current_time,
+        )
+    )
+    assert await repository.consume(expired.token_hash, current_time) is None
 
 
 @pytest.mark.anyio
@@ -110,10 +188,26 @@ async def test_password_reset_token_repository_round_trips_and_consumes(
     )
 
     fetched = await repository.get_by_token_hash(token.token_hash)
-    consumed = await repository.mark_consumed(token.id, current_time)
+    consumed = await repository.consume(token.token_hash, current_time)
 
     assert fetched.id == token.id
-    assert consumed.consumed_at == current_time
+    assert consumed is not None
+    assert consumed.consumed_at is not None
+    assert consumed.consumed_at.replace(tzinfo=UTC) == current_time
+    assert await repository.consume(token.token_hash, current_time) is None
+
+    expired = await repository.add(
+        PasswordResetToken(
+            id=uuid4(),
+            user_id=user.id,
+            token_hash="d" * 64,
+            expires_at=current_time - timedelta(seconds=1),
+            consumed_at=None,
+            created_at=current_time,
+            updated_at=current_time,
+        )
+    )
+    assert await repository.consume(expired.token_hash, current_time) is None
 
 
 @pytest.mark.anyio
@@ -544,37 +638,83 @@ async def test_outbox_event_repository_claims_and_updates_due_events(
             payload={},
         )
     )
-    future_event = await repository.add(
-        build_outbox_event(
-            event_type="exchange_offer.created",
-            aggregate_type="exchange_offer",
-            aggregate_id=uuid4(),
-            recipient_user_id=recipient.id,
-            payload={},
-        )
-    )
     current_time = datetime.now(UTC)
-    await repository.mark_failed(
-        event_id=future_event.id,
-        status=OutboxEventStatus.FAILED,
-        attempt_count=1,
-        last_error="provider unavailable",
-        next_attempt_at=current_time + timedelta(hours=1),
-        now=current_time,
-    )
-
     claimed = await repository.claim_due_for_dispatch(
         now=current_time,
         processing_deadline=current_time + timedelta(minutes=5),
-        limit=10,
+        limit=1,
     )
-    delivered = await repository.mark_delivered(due_event.id, current_time)
+    assert claimed[0].next_attempt_at is not None
+    delivered = await repository.mark_delivered(
+        event_id=due_event.id,
+        expected_processing_deadline=claimed[0].next_attempt_at,
+        now=current_time,
+    )
 
     assert [event.id for event in claimed] == [due_event.id]
     assert claimed[0].status is OutboxEventStatus.PROCESSING
     assert claimed[0].next_attempt_at == current_time + timedelta(minutes=5)
+    assert delivered is not None
     assert delivered.status is OutboxEventStatus.DELIVERED
     assert delivered.next_attempt_at is None
+
+
+@pytest.mark.anyio
+async def test_outbox_stale_finalizer_is_ignored_after_lease_reclaim(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        user = await uow.users.add(build_user(email="outbox-stale-finalizer@example.com"))
+        event = await uow.outbox_events.add(
+            build_outbox_event(
+                event_type="exchange_request.created",
+                aggregate_type="exchange_request",
+                aggregate_id=uuid4(),
+                recipient_user_id=user.id,
+                payload={},
+            )
+        )
+        await uow.commit()
+
+    first_now = datetime.now(UTC)
+    first_deadline = first_now + timedelta(minutes=5)
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        first_claim = await uow.outbox_events.claim_due_for_dispatch(
+            now=first_now,
+            processing_deadline=first_deadline,
+            limit=1,
+        )
+        await uow.commit()
+
+    second_now = first_deadline + timedelta(seconds=1)
+    second_deadline = second_now + timedelta(minutes=5)
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        second_claim = await uow.outbox_events.claim_due_for_dispatch(
+            now=second_now,
+            processing_deadline=second_deadline,
+            limit=1,
+        )
+        await uow.commit()
+
+    assert first_claim[0].id == event.id
+    assert second_claim[0].id == event.id
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        stale_result = await uow.outbox_events.mark_delivered(
+            event_id=event.id,
+            expected_processing_deadline=first_deadline,
+            now=second_now,
+        )
+        await uow.commit()
+
+    assert stale_result is None
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        current = await uow.outbox_events.list_admin()
+
+    assert current[0].status is OutboxEventStatus.PROCESSING
+    assert current[0].next_attempt_at is not None
+    assert current[0].next_attempt_at.replace(tzinfo=UTC) == second_deadline
 
 
 @pytest.mark.anyio

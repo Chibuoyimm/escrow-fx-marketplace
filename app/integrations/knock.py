@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol
+from uuid import UUID
 
+import knockapi
 from knockapi import AsyncKnock
 from knockapi.types import InlineIdentifyUserRequestParam
 
 from app.domain.entities import OutboxEvent, User
 from app.infrastructure.config import settings
+from app.infrastructure.exceptions import InfrastructureError
 from app.services._shared import UnitOfWorkFactory, build_uow
+from app.services.notification_preferences import (
+    NotificationPreferenceGateway,
+    NotificationPreferenceState,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class KnockClientProtocol(Protocol):
@@ -75,11 +86,9 @@ class KnockNotificationProvider:
         return event_type.replace("_", "-").replace(".", "-")
 
     async def _upsert_recipient(self, event: OutboxEvent, user: User) -> None:
-        await self._client.users.update(
-            str(user.id),
-            email=user.email,
-            name=self._display_name(user.email),
-            phone_number=user.phone,
+        await upsert_knock_user(
+            self._client,
+            user,
             idempotency_key=f"{event.id}:recipient-upsert",
         )
 
@@ -152,3 +161,179 @@ class KnockNotificationProvider:
                 str(key): KnockNotificationProvider._json_safe(item) for key, item in value.items()
             }
         return str(value)
+
+
+async def upsert_knock_user(
+    client: KnockClientProtocol,
+    user: User,
+    *,
+    idempotency_key: str,
+) -> None:
+    """Create or update a Knock recipient using the shared provider shape."""
+    await client.users.update(
+        str(user.id),
+        email=user.email,
+        name=KnockNotificationProvider._display_name(user.email),
+        phone_number=user.phone,
+        idempotency_key=idempotency_key,
+    )
+
+
+class KnockNotificationPreferenceGateway:
+    """Knock adapter for immediate recipient preference operations."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        branch: str | None = None,
+        client: KnockClientProtocol | None = None,
+    ) -> None:
+        self._client = client or KnockNotificationProvider._build_client(
+            api_key=api_key,
+            branch=branch,
+        )
+
+    async def upsert_recipient(self, user: User, *, idempotency_key: str) -> None:
+        """Reuse the notification dispatch recipient-identification shape."""
+        await _provider_call(
+            lambda: upsert_knock_user(self._client, user, idempotency_key=idempotency_key)
+        )
+
+    async def get_preferences(
+        self,
+        user_id: UUID,
+        *,
+        preference_set_id: str,
+    ) -> NotificationPreferenceState | None:
+        """Read a user preference set, treating a missing set as defaults."""
+        preference_set = await _provider_call(
+            lambda: self._client.users.get_preferences(str(user_id), preference_set_id),
+            missing_ok=True,
+        )
+        if preference_set is None:
+            return None
+        return _preference_state(preference_set, preference_set_id)
+
+    async def set_preferences(
+        self,
+        user_id: UUID,
+        *,
+        preference_set_id: str,
+        email_enabled_by_category: dict[str, bool],
+        idempotency_key: str,
+    ) -> NotificationPreferenceState:
+        """Merge only the requested email category settings in Knock."""
+        categories = {
+            category: {"channel_types": {"email": enabled}}
+            for category, enabled in email_enabled_by_category.items()
+        }
+        preference_set = await _provider_call(
+            lambda: self._client.users.set_preferences(
+                str(user_id),
+                preference_set_id,
+                _persistence_strategy="merge",
+                categories=categories,
+                idempotency_key=idempotency_key,
+            )
+        )
+        return _preference_state(preference_set, preference_set_id)
+
+
+def build_notification_preference_gateway() -> NotificationPreferenceGateway:
+    """Build the configured provider gateway for preference operations."""
+    if settings.notification_provider.strip().lower() != "knock":
+        raise InfrastructureError(
+            title="Notification Preferences Unavailable",
+            detail="The configured notification provider cannot manage preferences.",
+        )
+    if not settings.knock_api_key:
+        raise InfrastructureError(
+            title="Notification Preferences Unavailable",
+            detail="The Knock notification provider is not configured.",
+        )
+    return KnockNotificationPreferenceGateway()
+
+
+async def _provider_call(
+    operation: Callable[[], Awaitable[Any]],
+    *,
+    missing_ok: bool = False,
+) -> Any:
+    """Translate Knock SDK failures without exposing provider internals."""
+    try:
+        return await operation()
+    except knockapi.NotFoundError:
+        if missing_ok:
+            return None
+        raise _provider_infrastructure_error(status_code=404, request_id=None) from None
+    except knockapi.APIStatusError as exc:
+        raise _provider_infrastructure_error(
+            status_code=exc.status_code,
+            request_id=_provider_request_id(exc),
+        ) from None
+    except knockapi.APIConnectionError:
+        raise _provider_infrastructure_error(
+            status_code=None,
+            request_id=None,
+        ) from None
+    except Exception as exc:  # noqa: BLE001 - provider failures need one safe API error.
+        logger.warning("Knock preference operation failed exception_type=%s", type(exc).__name__)
+        raise _provider_infrastructure_error(status_code=None, request_id=None) from None
+
+
+def _provider_infrastructure_error(
+    *,
+    status_code: int | None,
+    request_id: str | None,
+) -> InfrastructureError:
+    """Create the sanitized infrastructure error used by API handlers."""
+    logger.warning(
+        "Knock preference operation failed status_code=%s provider_request_id=%s",
+        status_code,
+        request_id,
+    )
+    return InfrastructureError(
+        title="Notification Provider Error",
+        detail="The Knock notification provider request failed.",
+    )
+
+
+def _provider_request_id(exc: knockapi.APIStatusError) -> str | None:
+    """Extract only a safe provider request identifier for server logs."""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    request_id = headers.get("x-request-id") or headers.get("request-id")
+    return request_id if isinstance(request_id, str) else None
+
+
+def _preference_state(preference_set: Any, fallback_id: str) -> NotificationPreferenceState:
+    """Translate the SDK preference model into a provider-neutral state."""
+    preference_set_id = str(_field(preference_set, "id") or fallback_id)
+    categories = _field(preference_set, "categories") or {}
+    return NotificationPreferenceState(
+        preference_set_id=preference_set_id,
+        email_enabled_by_category={
+            str(category): _category_email_enabled(value) for category, value in categories.items()
+        },
+    )
+
+
+def _category_email_enabled(category: Any) -> bool:
+    """Read Knock's boolean or nested category representation."""
+    if isinstance(category, bool):
+        return category
+    channel_types = _field(category, "channel_types")
+    if channel_types is None:
+        return True
+    email = _field(channel_types, "email")
+    return email if isinstance(email, bool) else True
+
+
+def _field(value: Any, name: str) -> Any:
+    """Read a field from either a Knock model or a test-shaped mapping."""
+    if isinstance(value, Mapping):
+        return value.get(name)
+    return getattr(value, name, None)

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload, with_loader_criteria
 
 from app.domain.entities import (
+    AccountAuditEvent,
     Corridor,
     CorridorDetails,
     CorridorRail,
@@ -43,6 +44,7 @@ from app.domain.enums import (
 from app.domain.exceptions import ConflictError, NotFoundError
 from app.infrastructure.exceptions import InfrastructureError
 from app.infrastructure.pagination import Cursor
+from app.models.account_audit_event import AccountAuditEventModel
 from app.models.corridor import CorridorModel, CorridorRailModel
 from app.models.currency import CurrencyModel
 from app.models.email_verification_token import EmailVerificationTokenModel
@@ -54,6 +56,7 @@ from app.models.password_reset_token import PasswordResetTokenModel
 from app.models.trade_contract import TradeContractModel
 from app.models.user import UserModel
 from app.repositories.protocols import (
+    AccountAuditEventRepositoryProtocol,
     CorridorRailRepositoryProtocol,
     CorridorRepositoryProtocol,
     CurrencyRepositoryProtocol,
@@ -132,6 +135,19 @@ class SqlAlchemyUserRepository(SqlAlchemyRepository, UserRepositoryProtocol):
 
     async def get(self, user_id: UUID) -> User:
         model = await self.session.get(UserModel, user_id)
+        if model is None:
+            raise NotFoundError(f"User '{user_id}' was not found.")
+        return model.to_domain()
+
+    async def get_for_update(self, user_id: UUID) -> User:
+        statement: Select[tuple[UserModel]] = (
+            select(UserModel)
+            .where(UserModel.id == user_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        result = await self.session.execute(statement)
+        model = result.scalar_one_or_none()
         if model is None:
             raise NotFoundError(f"User '{user_id}' was not found.")
         return model.to_domain()
@@ -224,16 +240,24 @@ class SqlAlchemyEmailVerificationTokenRepository(
             raise NotFoundError("Email verification token was not found.")
         return model.to_domain()
 
-    async def mark_consumed(self, token_id: UUID, now: datetime) -> EmailVerificationToken:
-        model = await self.session.get(EmailVerificationTokenModel, token_id)
-        if model is None:
-            raise NotFoundError(f"Email verification token '{token_id}' was not found.")
-
-        model.consumed_at = now
-        model.updated_at = now
-
-        await self._flush_or_raise_conflict("That email verification token could not be updated.")
-        return model.to_domain()
+    async def consume(
+        self,
+        token_hash: str,
+        now: datetime,
+    ) -> EmailVerificationToken | None:
+        """Atomically consume an unexpired, unused email verification token."""
+        result = await self.session.execute(
+            update(EmailVerificationTokenModel)
+            .where(
+                EmailVerificationTokenModel.token_hash == token_hash,
+                EmailVerificationTokenModel.consumed_at.is_(None),
+                EmailVerificationTokenModel.expires_at > now,
+            )
+            .values(consumed_at=now, updated_at=now)
+            .returning(EmailVerificationTokenModel)
+        )
+        model = result.scalar_one_or_none()
+        return model.to_domain() if model is not None else None
 
 
 class SqlAlchemyPasswordResetTokenRepository(
@@ -266,16 +290,24 @@ class SqlAlchemyPasswordResetTokenRepository(
             raise NotFoundError("Password reset token was not found.")
         return model.to_domain()
 
-    async def mark_consumed(self, token_id: UUID, now: datetime) -> PasswordResetToken:
-        model = await self.session.get(PasswordResetTokenModel, token_id)
-        if model is None:
-            raise NotFoundError(f"Password reset token '{token_id}' was not found.")
-
-        model.consumed_at = now
-        model.updated_at = now
-
-        await self._flush_or_raise_conflict("That password reset token could not be updated.")
-        return model.to_domain()
+    async def consume(
+        self,
+        token_hash: str,
+        now: datetime,
+    ) -> PasswordResetToken | None:
+        """Atomically consume an unexpired, unused password reset token."""
+        result = await self.session.execute(
+            update(PasswordResetTokenModel)
+            .where(
+                PasswordResetTokenModel.token_hash == token_hash,
+                PasswordResetTokenModel.consumed_at.is_(None),
+                PasswordResetTokenModel.expires_at > now,
+            )
+            .values(consumed_at=now, updated_at=now)
+            .returning(PasswordResetTokenModel)
+        )
+        model = result.scalar_one_or_none()
+        return model.to_domain() if model is not None else None
 
 
 class SqlAlchemyKycVerificationRepository(
@@ -310,6 +342,20 @@ class SqlAlchemyKycVerificationRepository(
 
     async def get(self, verification_id: UUID) -> KycVerification:
         model = await self.session.get(KycVerificationModel, verification_id)
+        if model is None:
+            raise NotFoundError(f"KYC verification '{verification_id}' was not found.")
+        return model.to_domain()
+
+    async def get_for_update(self, verification_id: UUID) -> KycVerification:
+        """Fetch and lock a KYC verification row for a transactional decision."""
+        statement: Select[tuple[KycVerificationModel]] = (
+            select(KycVerificationModel)
+            .where(KycVerificationModel.id == verification_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        result = await self.session.execute(statement)
+        model = result.scalar_one_or_none()
         if model is None:
             raise NotFoundError(f"KYC verification '{verification_id}' was not found.")
         return model.to_domain()
@@ -726,6 +772,7 @@ class SqlAlchemyExchangeRequestRepository(SqlAlchemyRepository, ExchangeRequestR
             .options(*self._details_load_options())
             .where(
                 ExchangeRequestModel.creator_user_id != viewer_user_id,
+                ExchangeRequestModel.creator.has(UserModel.status == UserStatus.ACTIVE),
                 ExchangeRequestModel.status.in_(self._board_visible_statuses()),
                 ExchangeRequestModel.expires_at > self._utc_now(),
                 ExchangeRequestModel.from_currency.has(
@@ -752,6 +799,7 @@ class SqlAlchemyExchangeRequestRepository(SqlAlchemyRepository, ExchangeRequestR
                     ExchangeRequestModel.creator_user_id == viewer_user_id,
                     and_(
                         ExchangeRequestModel.creator_user_id != viewer_user_id,
+                        ExchangeRequestModel.creator.has(UserModel.status == UserStatus.ACTIVE),
                         ExchangeRequestModel.status.in_(self._board_visible_statuses()),
                         ExchangeRequestModel.expires_at > self._utc_now(),
                         ExchangeRequestModel.from_currency.has(
@@ -844,6 +892,19 @@ class SqlAlchemyExchangeRequestRepository(SqlAlchemyRepository, ExchangeRequestR
         result = await self.session.execute(statement)
         return result.scalar_one_or_none() is not None
 
+    async def has_actionable_for_creator(self, user_id: UUID, now: datetime) -> bool:
+        statement: Select[tuple[UUID]] = (
+            select(ExchangeRequestModel.id)
+            .where(
+                ExchangeRequestModel.creator_user_id == user_id,
+                ExchangeRequestModel.status.in_(self._board_visible_statuses()),
+                ExchangeRequestModel.expires_at > now,
+            )
+            .limit(1)
+        )
+        result = await self.session.execute(statement)
+        return result.scalar_one_or_none() is not None
+
     async def list_board_details_page(
         self,
         viewer_user_id: UUID,
@@ -870,6 +931,7 @@ class SqlAlchemyExchangeRequestRepository(SqlAlchemyRepository, ExchangeRequestR
             .options(*self._details_load_options())
             .where(
                 ExchangeRequestModel.creator_user_id != viewer_user_id,
+                ExchangeRequestModel.creator.has(UserModel.status == UserStatus.ACTIVE),
                 ExchangeRequestModel.status.in_(visible_statuses),
                 ExchangeRequestModel.expires_at > self._utc_now(),
                 ExchangeRequestModel.from_currency.has(
@@ -1117,6 +1179,19 @@ class SqlAlchemyExchangeOfferRepository(SqlAlchemyRepository, ExchangeOfferRepos
         result = await self.session.execute(statement)
         return result.scalar_one_or_none() is not None
 
+    async def has_active_for_user(self, user_id: UUID, now: datetime) -> bool:
+        statement: Select[tuple[UUID]] = (
+            select(ExchangeOfferModel.id)
+            .where(
+                ExchangeOfferModel.offer_user_id == user_id,
+                ExchangeOfferModel.status == ExchangeOfferStatus.ACTIVE,
+                ExchangeOfferModel.expires_at > now,
+            )
+            .limit(1)
+        )
+        result = await self.session.execute(statement)
+        return result.scalar_one_or_none() is not None
+
     async def list_admin_details_page(
         self,
         *,
@@ -1309,6 +1384,30 @@ class SqlAlchemyTradeContractRepository(SqlAlchemyRepository, TradeContractRepos
         )
         return [model.to_details() for model in details_result.unique().scalars().all()]
 
+    async def has_non_terminal_for_participant(self, user_id: UUID) -> bool:
+        terminal_statuses = (TradeContractStatus.SETTLED, TradeContractStatus.CANCELLED)
+        statement: Select[tuple[UUID]] = (
+            select(TradeContractModel.id)
+            .join(
+                ExchangeRequestModel,
+                TradeContractModel.request_id == ExchangeRequestModel.id,
+            )
+            .join(
+                ExchangeOfferModel,
+                TradeContractModel.accepted_offer_id == ExchangeOfferModel.id,
+            )
+            .where(
+                TradeContractModel.status.not_in(terminal_statuses),
+                or_(
+                    ExchangeRequestModel.creator_user_id == user_id,
+                    ExchangeOfferModel.offer_user_id == user_id,
+                ),
+            )
+            .limit(1)
+        )
+        result = await self.session.execute(statement)
+        return result.scalar_one_or_none() is not None
+
 
 class SqlAlchemyOutboxEventRepository(SqlAlchemyRepository, OutboxEventRepositoryProtocol):
     """Outbox event repository implementation."""
@@ -1412,18 +1511,31 @@ class SqlAlchemyOutboxEventRepository(SqlAlchemyRepository, OutboxEventRepositor
         await self._flush_or_raise_conflict("Due outbox events could not be claimed.")
         return [model.to_domain() for model in models]
 
-    async def mark_delivered(self, event_id: UUID, now: datetime) -> OutboxEvent:
-        model = await self.session.get(OutboxEventModel, event_id)
-        if model is None:
-            raise NotFoundError(f"Outbox event '{event_id}' was not found.")
-
-        model.status = OutboxEventStatus.DELIVERED
-        model.next_attempt_at = None
-        model.last_error = None
-        model.updated_at = now
-
-        await self._flush_or_raise_conflict("That outbox event could not be updated.")
-        return model.to_domain()
+    async def mark_delivered(
+        self,
+        *,
+        event_id: UUID,
+        expected_processing_deadline: datetime,
+        now: datetime,
+    ) -> OutboxEvent | None:
+        statement = (
+            update(OutboxEventModel)
+            .where(
+                OutboxEventModel.id == event_id,
+                OutboxEventModel.status == OutboxEventStatus.PROCESSING,
+                OutboxEventModel.next_attempt_at == expected_processing_deadline,
+            )
+            .values(
+                status=OutboxEventStatus.DELIVERED,
+                next_attempt_at=None,
+                last_error=None,
+                updated_at=now,
+            )
+            .returning(OutboxEventModel)
+        )
+        result = await self.session.execute(statement)
+        model = result.scalar_one_or_none()
+        return model.to_domain() if model is not None else None
 
     async def mark_failed(
         self,
@@ -1434,16 +1546,56 @@ class SqlAlchemyOutboxEventRepository(SqlAlchemyRepository, OutboxEventRepositor
         last_error: str,
         next_attempt_at: datetime | None,
         now: datetime,
-    ) -> OutboxEvent:
-        model = await self.session.get(OutboxEventModel, event_id)
-        if model is None:
-            raise NotFoundError(f"Outbox event '{event_id}' was not found.")
+        expected_processing_deadline: datetime,
+    ) -> OutboxEvent | None:
+        statement = (
+            update(OutboxEventModel)
+            .where(
+                OutboxEventModel.id == event_id,
+                OutboxEventModel.status == OutboxEventStatus.PROCESSING,
+                OutboxEventModel.next_attempt_at == expected_processing_deadline,
+            )
+            .values(
+                status=status,
+                attempt_count=attempt_count,
+                last_error=last_error[:1000],
+                next_attempt_at=next_attempt_at,
+                updated_at=now,
+            )
+            .returning(OutboxEventModel)
+        )
+        result = await self.session.execute(statement)
+        model = result.scalar_one_or_none()
+        return model.to_domain() if model is not None else None
 
-        model.status = status
-        model.attempt_count = attempt_count
-        model.last_error = last_error[:1000]
-        model.next_attempt_at = next_attempt_at
-        model.updated_at = now
 
-        await self._flush_or_raise_conflict("That outbox event could not be updated.")
+class SqlAlchemyAccountAuditEventRepository(
+    SqlAlchemyRepository,
+    AccountAuditEventRepositoryProtocol,
+):
+    """Append-only account audit event repository."""
+
+    async def add(self, event: AccountAuditEvent) -> AccountAuditEvent:
+        model = AccountAuditEventModel(
+            id=event.id,
+            subject_user_id=event.subject_user_id,
+            actor_user_id=event.actor_user_id,
+            event_type=event.event_type,
+            occurred_at=event.occurred_at,
+            metadata_json=event.metadata,
+        )
+        self.session.add(model)
+        await self._flush_or_raise_conflict("That account audit event could not be recorded.")
         return model.to_domain()
+
+    async def list_for_subject(self, subject_user_id: UUID) -> list[AccountAuditEvent]:
+        statement: Select[tuple[AccountAuditEventModel]] = (
+            select(AccountAuditEventModel)
+            .where(AccountAuditEventModel.subject_user_id == subject_user_id)
+            .order_by(
+                AccountAuditEventModel.occurred_at.desc(),
+                AccountAuditEventModel.id.desc(),
+            )
+        )
+        result = await self.session.execute(statement)
+        return [model.to_domain() for model in result.scalars().all()]

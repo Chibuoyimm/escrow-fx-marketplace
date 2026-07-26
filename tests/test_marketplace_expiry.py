@@ -13,6 +13,7 @@ from app.domain.enums import (
     ExchangeOfferStatus,
     ExchangeRequestStatus,
     TradeContractStatus,
+    UserStatus,
 )
 from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 from app.models.trade_contract import TradeContractModel
@@ -108,12 +109,32 @@ async def seed_expiry_scenario(
         await uow.commit()
 
     return {
+        "creator_id": creator.id,
         "expired_request_id": expired_request.id,
         "offer_on_expired_request_id": offer_on_expired_request.id,
         "pending_request_id": pending_request.id,
         "expired_offer_id": expired_offer.id,
         "due_trade_id": due_trade.id,
     }
+
+
+async def test_marketplace_expiry_continues_for_suspended_owners(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = await seed_expiry_scenario(session_factory)
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        creator = await uow.users.get_for_update(seeded["creator_id"])
+        await uow.users.update(replace(creator, status=UserStatus.SUSPENDED))
+        await uow.commit()
+
+    service = MarketplaceExpiryService(uow_factory=lambda: SqlAlchemyUnitOfWork(session_factory))
+    result = await service.expire_due_items()
+
+    assert result.expired_requests == 1
+    assert result.cancelled_trades == 1
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        request = await uow.exchange_requests.get(seeded["expired_request_id"])
+        assert request.status is ExchangeRequestStatus.EXPIRED
 
 
 async def test_marketplace_expiry_transitions_due_items(

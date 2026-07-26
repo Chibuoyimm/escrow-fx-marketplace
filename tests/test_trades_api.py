@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.domain.enums import (
@@ -19,11 +21,13 @@ from app.domain.enums import (
 from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.security import SecurityService
 from app.main import app
+from app.models.trade_contract import TradeContractModel
 from app.services.auth import AuthService, get_auth_service
 from app.services.exchange_offer import ExchangeOfferService, get_exchange_offer_service
 from app.services.exchange_request import ExchangeRequestService, get_exchange_request_service
 from app.services.trade import TradeService, get_trade_service
 from tests.conftest import (
+    assert_canonical_mutation_lock_order,
     build_corridor,
     build_currency,
     build_exchange_offer,
@@ -201,6 +205,7 @@ async def test_accept_offer_locks_trade_and_rejects_competing_offers(
     client: AsyncClient,
     auth_service: AuthService,
     session_factory: async_sessionmaker[AsyncSession],
+    mutation_lock_calls: list[tuple[str, UUID]],
 ) -> None:
     seeded = await seed_request_with_offer(session_factory)
     requester_headers = await login_headers(auth_service, email="requester@example.com")
@@ -215,6 +220,15 @@ async def test_accept_offer_locks_trade_and_rejects_competing_offers(
     assert body["request_id"] == str(seeded["request_id"])
     assert body["accepted_offer_id"] == str(seeded["offer_id"])
     assert body["status"] == "terms_locked"
+    assert_canonical_mutation_lock_order(mutation_lock_calls)
+    assert [resource for resource, _ in mutation_lock_calls] == [
+        "user",
+        "user",
+        "user",
+        "request",
+        "offer",
+        "offer",
+    ]
 
     async with SqlAlchemyUnitOfWork(session_factory) as uow:
         exchange_request = await uow.exchange_requests.get(seeded["request_id"])
@@ -233,6 +247,43 @@ async def test_accept_offer_locks_trade_and_rejects_competing_offers(
         }
         assert [event.aggregate_id for event in accepted_events] == [seeded["offer_id"]]
         assert [event.aggregate_id for event in rejected_events] == [seeded["competing_offer_id"]]
+
+
+@pytest.mark.parametrize("owner_status", [UserStatus.SUSPENDED, UserStatus.INACTIVE])
+async def test_accept_offer_rejects_non_active_offer_owner_without_mutation(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+    owner_status: UserStatus,
+) -> None:
+    seeded = await seed_request_with_offer(
+        session_factory,
+        email_prefix=f"non-active-{owner_status.value}-",
+    )
+    requester_headers = await login_headers(
+        auth_service,
+        email=f"non-active-{owner_status.value}-requester@example.com",
+    )
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        owner = await uow.users.get_for_update(seeded["counterparty_id"])
+        await uow.users.update(replace(owner, status=owner_status))
+        await uow.commit()
+
+    response = await client.post(
+        f"/api/v1/offers/{seeded['offer_id']}/accept",
+        headers=requester_headers,
+    )
+
+    assert response.status_code == 412
+    assert response.json()["error_code"] == "precondition_failed"
+    async with session_factory() as session:
+        trade_count = await session.scalar(select(func.count()).select_from(TradeContractModel))
+        assert trade_count == 0
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        request = await uow.exchange_requests.get(seeded["request_id"])
+        offer = await uow.exchange_offers.get(seeded["offer_id"])
+        assert request.status is ExchangeRequestStatus.OFFER_PENDING
+        assert offer.status is ExchangeOfferStatus.ACTIVE
 
 
 async def test_accept_offer_requires_request_creator(

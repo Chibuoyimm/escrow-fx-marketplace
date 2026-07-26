@@ -12,11 +12,24 @@ from app.domain.enums import (
     ExchangeOfferStatus,
     ExchangeRequestStatus,
     TradeContractStatus,
+    UserStatus,
 )
-from app.domain.exceptions import AuthorizationError, InvariantViolationError, NotFoundError
+from app.domain.exceptions import (
+    AuthorizationError,
+    ConflictError,
+    InvariantViolationError,
+    NotFoundError,
+    PreconditionFailedError,
+)
 from app.domain.lifecycle import offer_is_active, request_can_accept_offers
 from app.infrastructure.pagination import decode_cursor, encode_next_cursor, normalize_date_range
-from app.services._shared import UnitOfWorkFactory, as_utc, build_uow, utc_now
+from app.services._shared import (
+    UnitOfWorkFactory,
+    as_utc,
+    build_uow,
+    lock_users_in_order,
+    utc_now,
+)
 from app.services.outbox import OutboxEventPublisher
 
 
@@ -42,11 +55,50 @@ class TradeService:
 
         async with self._uow_factory() as uow:
             initial_offer = await uow.exchange_offers.get(offer_id)
-            exchange_request = await uow.exchange_requests.get_for_update(initial_offer.request_id)
-            offer = await uow.exchange_offers.get_for_update(offer_id)
-
-            if exchange_request.creator_user_id != requester_user_id:
+            initial_request = await uow.exchange_requests.get(initial_offer.request_id)
+            if initial_request.creator_user_id != requester_user_id:
                 raise AuthorizationError("Only the request creator can accept an offer.")
+            initial_offers = await uow.exchange_offers.list_for_request(initial_request.id)
+            initial_offer_owners = {
+                candidate.id: candidate.offer_user_id for candidate in initial_offers
+            }
+            if offer_id not in initial_offer_owners:
+                raise ConflictError("Exchange request offers changed; retry the operation.")
+            users = await lock_users_in_order(
+                uow,
+                (initial_request.creator_user_id, *initial_offer_owners.values()),
+            )
+            exchange_request = await uow.exchange_requests.get_for_update(initial_request.id)
+            if exchange_request.creator_user_id != initial_request.creator_user_id:
+                raise ConflictError("Exchange request participants changed; retry the operation.")
+
+            current_offers = await uow.exchange_offers.list_for_request(exchange_request.id)
+            current_offer_owners = {
+                candidate.id: candidate.offer_user_id for candidate in current_offers
+            }
+            if current_offer_owners != initial_offer_owners:
+                raise ConflictError("Exchange request offers changed; retry the operation.")
+
+            offers = []
+            for current_offer in sorted(current_offers, key=lambda candidate: candidate.id.int):
+                locked_offer = await uow.exchange_offers.get_for_update(current_offer.id)
+                if (
+                    locked_offer.request_id != exchange_request.id
+                    or locked_offer.offer_user_id != initial_offer_owners[locked_offer.id]
+                ):
+                    raise ConflictError(
+                        "Exchange offer relationships changed; retry the operation."
+                    )
+                offers.append(locked_offer)
+            offer = next(candidate for candidate in offers if candidate.id == offer_id)
+
+            if users[requester_user_id].status is not UserStatus.ACTIVE:
+                raise AuthorizationError("Only active users can accept exchange offers.")
+            if users[offer.offer_user_id].status is not UserStatus.ACTIVE:
+                raise PreconditionFailedError(
+                    "The offer owner is not active, so this offer cannot be accepted."
+                )
+
             if not request_can_accept_offers(exchange_request.status):
                 raise InvariantViolationError("This exchange request can no longer accept offers.")
             if as_utc(exchange_request.expires_at) <= current_time:
@@ -95,7 +147,6 @@ class TradeService:
                 )
             )
 
-            offers = await uow.exchange_offers.list_for_request(exchange_request.id)
             for existing_offer in offers:
                 if existing_offer.status is not ExchangeOfferStatus.ACTIVE:
                     continue

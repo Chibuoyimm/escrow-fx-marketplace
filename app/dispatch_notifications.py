@@ -27,7 +27,7 @@ async def run_command(
         "Notification dispatch complete: "
         f"{result.claimed} events claimed, "
         f"{result.delivered} delivered, "
-        f"{result.failed} failed."
+        f"{result.failed} failed, {result.stale} stale finalizers."
     )
 
 

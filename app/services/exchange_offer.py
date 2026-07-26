@@ -7,7 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from app.domain.entities import ExchangeOffer, ExchangeOfferDetails
+from app.domain.entities import ExchangeOffer, ExchangeOfferDetails, ExchangeRequest, User
 from app.domain.enums import ExchangeOfferStatus, ExchangeRequestStatus, KycStatus, UserStatus
 from app.domain.exceptions import (
     AuthorizationError,
@@ -18,13 +18,21 @@ from app.domain.exceptions import (
 )
 from app.domain.lifecycle import offer_is_active, request_can_accept_offers
 from app.domain.value_objects import Rate
+from app.infrastructure.database.unit_of_work import AbstractUnitOfWork
 from app.infrastructure.pagination import (
     decode_cursor,
     encode_next_cursor,
     normalize_date_range,
     validate_range,
 )
-from app.services._shared import UnitOfWorkFactory, as_utc, build_uow, format_decimal, utc_now
+from app.services._shared import (
+    UnitOfWorkFactory,
+    as_utc,
+    build_uow,
+    format_decimal,
+    lock_users_in_order,
+    utc_now,
+)
 from app.services.outbox import OutboxEventPublisher
 
 
@@ -50,6 +58,27 @@ class ExchangeOfferService:
             return ExchangeRequestStatus.OFFER_PENDING
         return ExchangeRequestStatus.REQUEST_OPEN
 
+    @staticmethod
+    async def _lock_existing_offer_context(
+        uow: AbstractUnitOfWork,
+        offer_id: UUID,
+    ) -> tuple[dict[UUID, User], ExchangeRequest, ExchangeOffer]:
+        initial_offer = await uow.exchange_offers.get(offer_id)
+        initial_request = await uow.exchange_requests.get(initial_offer.request_id)
+        users = await lock_users_in_order(
+            uow,
+            (initial_request.creator_user_id, initial_offer.offer_user_id),
+        )
+        exchange_request = await uow.exchange_requests.get_for_update(initial_request.id)
+        offer = await uow.exchange_offers.get_for_update(offer_id)
+        if (
+            exchange_request.creator_user_id != initial_request.creator_user_id
+            or offer.request_id != initial_request.id
+            or offer.offer_user_id != initial_offer.offer_user_id
+        ):
+            raise ConflictError("Exchange offer relationships changed; retry the operation.")
+        return users, exchange_request, offer
+
     async def create_offer(
         self,
         *,
@@ -62,15 +91,29 @@ class ExchangeOfferService:
         current_time = utc_now()
 
         async with self._uow_factory() as uow:
-            user = await uow.users.get(offer_user_id)
+            initial_request = await uow.exchange_requests.get(request_id)
+            if initial_request.creator_user_id == offer_user_id:
+                raise InvariantViolationError("You cannot offer on your own exchange request.")
+
+            users = await lock_users_in_order(
+                uow,
+                (offer_user_id, initial_request.creator_user_id),
+            )
+            exchange_request = await uow.exchange_requests.get_for_update(request_id)
+            if exchange_request.creator_user_id != initial_request.creator_user_id:
+                raise ConflictError("Exchange request participants changed; retry the operation.")
+
+            user = users[offer_user_id]
             if user.status is not UserStatus.ACTIVE:
                 raise AuthorizationError("Only active users can create exchange offers.")
             if user.kyc_status is not KycStatus.VERIFIED:
                 raise PreconditionFailedError("Verified KYC is required to create exchange offers.")
 
-            exchange_request = await uow.exchange_requests.get_for_update(request_id)
-            if exchange_request.creator_user_id == offer_user_id:
-                raise InvariantViolationError("You cannot offer on your own exchange request.")
+            request_creator = users[exchange_request.creator_user_id]
+            if request_creator.status is not UserStatus.ACTIVE:
+                raise PreconditionFailedError(
+                    "The request creator is not active, so this request cannot receive offers."
+                )
             if exchange_request.min_rate is not None and rate.value < exchange_request.min_rate:
                 raise InvariantViolationError(
                     "Offered rate cannot be lower than the request minimum rate."
@@ -191,12 +234,10 @@ class ExchangeOfferService:
         current_time = utc_now()
         rate = Rate(value=offered_rate)
         async with self._uow_factory() as uow:
-            initial_offer = await uow.exchange_offers.get(offer_id)
-            exchange_request = await uow.exchange_requests.get_for_update(initial_offer.request_id)
-            offer = await uow.exchange_offers.get_for_update(offer_id)
+            users, exchange_request, offer = await self._lock_existing_offer_context(uow, offer_id)
             if offer.offer_user_id != offer_user_id:
                 raise NotFoundError(f"Exchange offer '{offer_id}' was not found.")
-            user = await uow.users.get(offer_user_id)
+            user = users[offer.offer_user_id]
             if user.status is not UserStatus.ACTIVE:
                 raise AuthorizationError("Only active users can edit exchange offers.")
             if user.kyc_status is not KycStatus.VERIFIED:
@@ -238,9 +279,7 @@ class ExchangeOfferService:
         current_time = utc_now()
 
         async with self._uow_factory() as uow:
-            initial_offer = await uow.exchange_offers.get(offer_id)
-            exchange_request = await uow.exchange_requests.get_for_update(initial_offer.request_id)
-            offer = await uow.exchange_offers.get_for_update(offer_id)
+            _, exchange_request, offer = await self._lock_existing_offer_context(uow, offer_id)
             if offer.offer_user_id != offer_user_id:
                 raise NotFoundError(f"Exchange offer '{offer_id}' was not found.")
             if not offer_is_active(offer.status):
@@ -296,9 +335,7 @@ class ExchangeOfferService:
         current_time = utc_now()
 
         async with self._uow_factory() as uow:
-            initial_offer = await uow.exchange_offers.get(offer_id)
-            exchange_request = await uow.exchange_requests.get_for_update(initial_offer.request_id)
-            offer = await uow.exchange_offers.get_for_update(offer_id)
+            _, exchange_request, offer = await self._lock_existing_offer_context(uow, offer_id)
             if not offer_is_active(offer.status):
                 raise InvariantViolationError("This offer can no longer be rejected.")
             if as_utc(offer.expires_at) <= current_time:

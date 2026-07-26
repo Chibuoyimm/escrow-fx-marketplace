@@ -41,6 +41,27 @@ Near-term backend priorities:
 
 Funding, escrow legs, ledgers, payout rails, and payment webhooks remain deferred until explicitly picked up.
 
+## Account Management Decisions
+
+- `PATCH /api/v1/users/me` currently permits only `phone`. Formatting whitespace is removed, then provider-neutral validation requires `+` followed by 7-15 digits; email and country are immutable.
+- `POST /api/v1/users/me/deactivate` soft-deactivates the account after current-password verification. It is blocked by an owned non-expired open/pending request, an owned non-expired active offer, or participation in any trade other than `settled`/`cancelled`. It preserves all related records and invalidates the bearer token immediately. Repeating the call with that token returns `401`; self-reactivation is not supported.
+- `PATCH /api/v1/admin/users/{user_id}/status` is admin-only for suspension/reactivation. Service-layer authorization re-reads and locks both actor and subject in UUID order. Operations users can inspect and review but cannot change account status. Administrators cannot change their own status.
+- Emergency suspension remains available despite marketplace obligations and does not cancel them. Board queries hide non-active owners, offer creation requires an active request owner, offer acceptance requires an active offer owner, and expiry processing still transitions due records.
+- Account and marketplace mutations use one canonical row-lock order: all participant users sorted by UUID, then the exchange request, then exchange offers sorted by UUID. When participant IDs require discovery, perform non-locking reads first, acquire locks in canonical order, and validate immutable relationships after locking. Never acquire a request or offer lock before a participant user lock.
+- Current database status is checked during login and bearer-token authentication, so suspension/deactivation invalidates existing tokens without JWT revocation state.
+- Security-sensitive account changes are recorded in the append-only `account_audit_events` table and published through `OutboxEventPublisher` atomically with the user mutation. Audit metadata excludes passwords and profile values. The repository exposes only append/read operations, ORM instance updates/deletes are rejected, and production application credentials should lack `UPDATE`/`DELETE` privileges on this table.
+- Notification preferences are backed by Knock's `default` preference set; do not
+  add a local preferences table or outbox events for preference reads/updates.
+- `GET` and `PATCH /api/v1/users/me/notification-preferences` expose only the
+  provider-neutral categories `security`, `kyc`, `trade`, and `marketplace`.
+- Only `marketplace.email_enabled` is mutable. Security, KYC, and trade
+  workflows are mandatory and must use Knock's Override recipient preferences
+  setting. The hosted preference center must expose only marketplace settings.
+- Knock preference updates must use `_persistence_strategy="merge"`; replacing
+  a complete preference set could erase unrelated provider configuration.
+- A successful dispatcher result means Knock accepted the workflow trigger. It
+  does not prove that an email was delivered or reached Gmail.
+
 ## Do Not Do
 
 - Do not add frontend pages or frontend app code to this repo.
@@ -176,6 +197,15 @@ The dispatcher:
 - retries failures with exponential backoff
 - marks exhausted failures dead
 
+The centralized workflow-category checklist is in
+`app/services/notification_categories.py`. It maps security events (including
+profile and account-status changes) to `security`, all `user.kyc.*` events to
+`kyc`, exchange request/offer activity except accepted offers to `marketplace`,
+accepted offers and trade-contract events to `trade`, and
+`marketplace_expiry.completed` to `none`. Knock workflow categories and
+mandatory preference overrides are configured manually in the Knock dashboard;
+the application does not pretend to configure committed dashboard workflows.
+
 Knock workflow keys are derived from event type by replacing dots and underscores with hyphens.
 
 Examples:
@@ -185,6 +215,13 @@ Examples:
 - `exchange_request.relisted` -> `exchange-request-relisted`
 - `exchange_offer.updated` -> `exchange-offer-updated`
 - `trade_contract.locked` -> `trade-contract-locked`
+- `user.profile_updated` -> `user-profile-updated`
+- `user.account_deactivated` -> `user-account-deactivated`
+- `user.account_suspended` -> `user-account-suspended`
+- `user.account_reactivated` -> `user-account-reactivated`
+
+Create and commit all required Knock workflows before enabling their producing
+business paths in an environment.
 
 Knock rendering data is sent as uppercase top-level variables, such as:
 

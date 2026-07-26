@@ -118,6 +118,75 @@ token from the URL and calls `POST /api/v1/auth/verify-email`.
 Set `APP_PASSWORD_RESET_FRONTEND_URL` to the frontend page that reads the reset
 token from the URL and calls `POST /api/v1/auth/reset-password`.
 
+Account management currently supports:
+
+```bash
+PATCH /api/v1/users/me
+POST /api/v1/users/me/deactivate
+PATCH /api/v1/admin/users/{user_id}/status
+```
+
+Profile updates are limited to `phone`; formatting whitespace is removed and
+the remaining value must contain `+` followed by 7-15 digits.
+This is provider-neutral validation, not country-specific number validation.
+Email and country remain immutable. An empty update and unknown fields are
+rejected. Deactivation requires the current password and changes the user to
+`inactive` without deleting marketplace, KYC, or trade records. It is rejected
+while the user owns a non-expired open/pending request, owns a non-expired active
+offer, or participates
+in a trade that is not `settled` or `cancelled`. A successful deactivation
+immediately invalidates the current bearer token, so a repeat call with that
+token returns `401`; an administrator can reactivate an inactive account.
+Administrators can suspend active users even when obligations exist. Suspension
+does not silently cancel marketplace records, but hides the owner's requests
+from the board and prevents new offers or acceptance involving the suspended
+participant. Expiry processing continues for their existing records.
+
+To avoid deadlocks and keep deactivation checks serialized with marketplace
+mutations, row locks are always acquired in this order: participant users sorted
+by UUID, then the exchange request, then exchange offers sorted by UUID.
+Services may use initial non-locking reads to discover immutable participant
+relationships, but must revalidate those relationships after acquiring locks.
+SQLite tests assert repository call order; PostgreSQL concurrency testing should
+also exercise these paths before production rollout.
+
+Account profile and status changes are recorded in the append-only
+`account_audit_events` table and publish security outbox events in the same
+transaction. Audit metadata contains field names or lifecycle states only; it
+does not contain passwords or profile before/after secrets. The ORM rejects
+instance updates and deletes, and production database credentials used by the
+application should have no `UPDATE` or `DELETE` privileges on this table.
+
+Notification preferences are owned by Knock and are not duplicated in the
+database:
+
+```bash
+GET /api/v1/users/me/notification-preferences
+PATCH /api/v1/users/me/notification-preferences
+```
+
+The response exposes `security`, `kyc`, `trade`, and `marketplace` categories,
+each with `email_enabled` and `mutable`. Only
+`marketplace.email_enabled` can currently be changed:
+
+```json
+{
+  "categories": {
+    "marketplace": {
+      "email_enabled": false
+    }
+  }
+}
+```
+
+Preference operations are immediate Knock calls and do not create outbox
+events. The adapter always identifies the current Knock recipient first and
+uses merge semantics so unrelated preferences are preserved. If a user-level
+`default` set does not exist, the API returns all categories enabled, matching
+Knock's defaults. If the configured notification provider is not Knock, these
+endpoints return `503` because the logging provider cannot be a preference
+source of truth.
+
 Nigeria KYC has a provider-ready backend foundation:
 
 ```bash
@@ -215,11 +284,36 @@ Outbox event types are mapped to hyphenated Knock workflow keys. For example,
 `exchange_offer.updated` triggers `exchange-offer-updated`, and
 `trade_contract.locked` triggers `trade-contract-locked`.
 
+Account lifecycle paths require these committed Knock workflows before they are
+enabled in an environment:
+
+- `user.profile_updated` -> `user-profile-updated`
+- `user.account_deactivated` -> `user-account-deactivated`
+- `user.account_suspended` -> `user-account-suspended`
+- `user.account_reactivated` -> `user-account-reactivated`
+
 The dispatcher marks events as delivered on success and schedules failed events
 for retry with exponential backoff. Events that exhaust
 `APP_NOTIFICATION_MAX_ATTEMPTS` are marked `dead` for admin inspection instead of
 retrying forever. The Knock provider sends top-level uppercase rendering data
 such as `REQUEST_ID`, `OFFER_ID`, and `USER_NAME`.
+
+Knock workflow categories are tracked in
+`app/services/notification_categories.py`. Configure these manually in the
+Knock dashboard:
+
+- `security`: email verification, password, profile, and account-status events
+- `kyc`: all `user.kyc.*` events
+- `marketplace`: exchange request/offer events except accepted offers
+- `trade`: accepted offers and `trade_contract.*` events
+- `none`: `marketplace_expiry.completed`
+
+Enable Knock's **Override recipient preferences** option for mandatory
+security, KYC, and trade workflows. The hosted preference center should expose
+only marketplace preferences. A successful outbox dispatch means Knock
+accepted the workflow trigger; it does not guarantee that a channel was sent
+or delivered. Actual delivery status belongs to Knock/Resend logs or provider
+webhooks.
 
 ## Run
 

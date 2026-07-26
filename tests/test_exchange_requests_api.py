@@ -26,6 +26,7 @@ from app.services.auth import AuthService, get_auth_service
 from app.services.exchange_offer import ExchangeOfferService, get_exchange_offer_service
 from app.services.exchange_request import ExchangeRequestService, get_exchange_request_service
 from tests.conftest import (
+    assert_canonical_mutation_lock_order,
     build_corridor,
     build_currency,
     build_exchange_offer,
@@ -212,12 +213,15 @@ async def test_create_exchange_request_succeeds_for_verified_user(
     assert events[0].aggregate_id == UUID(body["id"])
     assert events[0].recipient_user_id == user_id
     assert events[0].payload["from_currency_code"] == "USD"
+    assert events[0].payload["preferred_rate"] == "1500"
+    assert events[0].payload["min_rate"] == "1450"
 
 
 async def test_update_exchange_request_persists_terms_without_extending_expiry(
     client: AsyncClient,
     auth_service: AuthService,
     session_factory: async_sessionmaker[AsyncSession],
+    mutation_lock_calls: list[tuple[str, UUID]],
 ) -> None:
     seeded, headers = await seed_request_for_user(
         session_factory, auth_service, email="request-editor@example.com"
@@ -237,6 +241,8 @@ async def test_update_exchange_request_persists_terms_without_extending_expiry(
     assert Decimal(body["preferred_rate"]) == Decimal("1520.00")
     assert Decimal(body["min_rate"]) == Decimal("1500.00")
     assert datetime.fromisoformat(body["expires_at"].replace("Z", "+00:00")) == original.expires_at
+    assert_canonical_mutation_lock_order(mutation_lock_calls)
+    assert [resource for resource, _ in mutation_lock_calls] == ["user", "request"]
 
 
 async def test_update_exchange_request_rejects_historical_offers(
@@ -410,6 +416,7 @@ async def test_relist_creates_new_request_and_preserves_terminal_original(
     client: AsyncClient,
     auth_service: AuthService,
     session_factory: async_sessionmaker[AsyncSession],
+    mutation_lock_calls: list[tuple[str, UUID]],
 ) -> None:
     seeded, headers = await seed_request_for_user(
         session_factory,
@@ -432,6 +439,9 @@ async def test_relist_creates_new_request_and_preserves_terminal_original(
     assert body["relisted_from_request_id"] == str(seeded["request_id"])
     assert Decimal(body["from_amount"]) == Decimal("350")
     assert Decimal(body["preferred_rate"]) == Decimal("1500")
+    assert_canonical_mutation_lock_order(mutation_lock_calls)
+    assert [resource for resource, _ in mutation_lock_calls] == ["user", "request"]
+    mutation_lock_calls.clear()
     async with SqlAlchemyUnitOfWork(session_factory) as uow:
         original = await uow.exchange_requests.get(seeded["request_id"])
         assert original.status is ExchangeRequestStatus.EXPIRED
@@ -968,6 +978,38 @@ async def test_list_exchange_requests_returns_board_visible_requests(
     assert all(request["creator_user_id"] != str(viewer_id) for request in body["items"])
 
 
+@pytest.mark.parametrize("owner_status", [UserStatus.SUSPENDED, UserStatus.INACTIVE])
+async def test_board_excludes_requests_owned_by_non_active_users(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+    owner_status: UserStatus,
+) -> None:
+    currencies = await seed_currencies_and_corridor(session_factory)
+    _, headers = await create_user_and_token(
+        session_factory, auth_service, email=f"board-viewer-{owner_status.value}@example.com"
+    )
+    owner_id, _ = await create_user_and_token(
+        session_factory, auth_service, email=f"board-owner-{owner_status.value}@example.com"
+    )
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        request = await uow.exchange_requests.add(
+            build_exchange_request(
+                creator_user_id=owner_id,
+                from_currency_id=currencies["from_currency_id"],
+                to_currency_id=currencies["to_currency_id"],
+            )
+        )
+        owner = await uow.users.get_for_update(owner_id)
+        await uow.users.update(replace(owner, status=owner_status))
+        await uow.commit()
+
+    response = await client.get("/api/v1/exchange-requests", headers=headers)
+
+    assert response.status_code == 200
+    assert all(item["id"] != str(request.id) for item in response.json()["items"])
+
+
 async def test_list_my_exchange_requests_returns_only_authenticated_users_requests(
     client: AsyncClient,
     auth_service: AuthService,
@@ -1081,6 +1123,7 @@ async def test_cancel_exchange_request_cancels_active_request_and_rejects_offers
     client: AsyncClient,
     auth_service: AuthService,
     session_factory: async_sessionmaker[AsyncSession],
+    mutation_lock_calls: list[tuple[str, UUID]],
 ) -> None:
     currencies = await seed_currencies_and_corridor(session_factory)
     creator_id, creator_headers = await create_user_and_token(
@@ -1118,6 +1161,13 @@ async def test_cancel_exchange_request_cancels_active_request_and_rejects_offers
 
     assert response.status_code == 200
     assert response.json()["status"] == "cancelled"
+    assert_canonical_mutation_lock_order(mutation_lock_calls)
+    assert [resource for resource, _ in mutation_lock_calls] == [
+        "user",
+        "user",
+        "request",
+        "offer",
+    ]
 
     async with SqlAlchemyUnitOfWork(session_factory) as uow:
         reloaded_request = await uow.exchange_requests.get(exchange_request.id)

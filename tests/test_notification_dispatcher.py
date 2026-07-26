@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import cast
 from uuid import uuid4
 
@@ -36,6 +37,24 @@ class FailingProvider:
 
     async def send(self, event: OutboxEvent) -> None:
         raise RuntimeError(f"cannot deliver {event.id}")
+
+
+class ReclaimingProvider:
+    """Provider double that lets another worker reclaim before finalization."""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def send(self, event: OutboxEvent) -> None:
+        assert event.next_attempt_at is not None
+        async with SqlAlchemyUnitOfWork(self._session_factory) as uow:
+            claimed = await uow.outbox_events.claim_due_for_dispatch(
+                now=event.next_attempt_at + timedelta(seconds=1),
+                processing_deadline=event.next_attempt_at + timedelta(minutes=5),
+                limit=1,
+            )
+            assert [claimed_event.id for claimed_event in claimed] == [event.id]
+            await uow.commit()
 
 
 class FakeKnockWorkflows:
@@ -170,6 +189,27 @@ async def test_notification_dispatcher_marks_successful_events_delivered(
     assert events[0].last_error is None
 
 
+async def test_notification_dispatcher_ignores_stale_finalizer(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await add_outbox_event(session_factory, email="dispatch-stale@example.com")
+    service = NotificationDispatchService(
+        uow_factory=lambda: SqlAlchemyUnitOfWork(session_factory),
+        provider=ReclaimingProvider(session_factory),
+    )
+
+    result = await service.dispatch_due()
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        events = await uow.outbox_events.list_admin()
+
+    assert result.claimed == 1
+    assert result.delivered == 0
+    assert result.failed == 0
+    assert result.stale == 1
+    assert events[0].status is OutboxEventStatus.PROCESSING
+
+
 async def test_notification_dispatcher_marks_failures_for_retry(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -203,6 +243,12 @@ async def test_notification_dispatcher_marks_exhausted_failures_dead(
 ) -> None:
     event = await add_outbox_event(session_factory, email="dispatch-dead@example.com")
     async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        claimed = await uow.outbox_events.claim_due_for_dispatch(
+            now=event.created_at,
+            processing_deadline=event.created_at + timedelta(minutes=5),
+            limit=1,
+        )
+        assert claimed[0].next_attempt_at is not None
         await uow.outbox_events.mark_failed(
             event_id=event.id,
             status=OutboxEventStatus.FAILED,
@@ -210,6 +256,7 @@ async def test_notification_dispatcher_marks_exhausted_failures_dead(
             last_error="previous failure",
             next_attempt_at=None,
             now=event.created_at,
+            expected_processing_deadline=claimed[0].next_attempt_at,
         )
         await uow.commit()
     service = NotificationDispatchService(

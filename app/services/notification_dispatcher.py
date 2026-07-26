@@ -38,6 +38,7 @@ class NotificationDispatchResult:
     claimed: int
     delivered: int
     failed: int
+    stale: int
 
 
 class NotificationDispatchService:
@@ -84,30 +85,45 @@ class NotificationDispatchService:
 
         delivered = 0
         failed = 0
+        stale = 0
         for event in events:
             try:
                 await self._provider.send(event)
             except Exception as exc:  # noqa: BLE001 - provider errors must not stop the batch.
-                failed += 1
-                await self._mark_failed(event, exc)
+                if await self._mark_failed(event, exc):
+                    failed += 1
+                else:
+                    stale += 1
             else:
-                delivered += 1
-                await self._mark_delivered(event)
+                if await self._mark_delivered(event):
+                    delivered += 1
+                else:
+                    stale += 1
 
         return NotificationDispatchResult(
             claimed=len(events),
             delivered=delivered,
             failed=failed,
+            stale=stale,
         )
 
-    async def _mark_delivered(self, event: OutboxEvent) -> None:
+    async def _mark_delivered(self, event: OutboxEvent) -> bool:
         current_time = utc_now()
+        if event.next_attempt_at is None:
+            return False
         async with self._uow_factory() as uow:
-            await uow.outbox_events.mark_delivered(event.id, current_time)
+            finalized = await uow.outbox_events.mark_delivered(
+                event_id=event.id,
+                expected_processing_deadline=event.next_attempt_at,
+                now=current_time,
+            )
             await uow.commit()
+            return finalized is not None
 
-    async def _mark_failed(self, event: OutboxEvent, exc: Exception) -> None:
+    async def _mark_failed(self, event: OutboxEvent, exc: Exception) -> bool:
         current_time = utc_now()
+        if event.next_attempt_at is None:
+            return False
         attempt_count = event.attempt_count + 1
         exhausted_retries = attempt_count >= self._max_attempts
         status = OutboxEventStatus.DEAD if exhausted_retries else OutboxEventStatus.FAILED
@@ -117,15 +133,17 @@ class NotificationDispatchService:
             else current_time + timedelta(seconds=self._retry_delay_seconds(attempt_count))
         )
         async with self._uow_factory() as uow:
-            await uow.outbox_events.mark_failed(
+            finalized = await uow.outbox_events.mark_failed(
                 event_id=event.id,
                 status=status,
                 attempt_count=attempt_count,
                 last_error=str(exc) or exc.__class__.__name__,
                 next_attempt_at=next_attempt_at,
                 now=current_time,
+                expected_processing_deadline=event.next_attempt_at,
             )
             await uow.commit()
+            return finalized is not None
 
     def _retry_delay_seconds(self, attempt_count: int) -> int:
         delay: int = self._retry_base_seconds * (2 ** max(attempt_count - 1, 0))

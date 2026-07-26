@@ -25,6 +25,7 @@ from app.services.auth import AuthService, get_auth_service
 from app.services.exchange_offer import ExchangeOfferService, get_exchange_offer_service
 from app.services.exchange_request import ExchangeRequestService, get_exchange_request_service
 from tests.conftest import (
+    assert_canonical_mutation_lock_order,
     build_corridor,
     build_currency,
     build_exchange_offer,
@@ -153,6 +154,7 @@ async def test_create_exchange_offer_succeeds_and_promotes_request(
     client: AsyncClient,
     auth_service: AuthService,
     session_factory: async_sessionmaker[AsyncSession],
+    mutation_lock_calls: list[tuple[str, UUID]],
 ) -> None:
     seeded = await seed_marketplace_request(session_factory)
     offer_user_id, headers = await create_user_and_token(
@@ -172,16 +174,58 @@ async def test_create_exchange_offer_succeeds_and_promotes_request(
     assert body["offer_user_id"] == str(offer_user_id)
     assert body["request_id"] == str(seeded["request_id"])
     assert body["status"] == "active"
+    assert_canonical_mutation_lock_order(mutation_lock_calls)
+    assert [resource for resource, _ in mutation_lock_calls] == [
+        "user",
+        "user",
+        "request",
+    ]
 
     async with SqlAlchemyUnitOfWork(session_factory) as uow:
         exchange_request = await uow.exchange_requests.get(seeded["request_id"])
         assert exchange_request.status is ExchangeRequestStatus.OFFER_PENDING
 
 
+@pytest.mark.parametrize("creator_status", [UserStatus.SUSPENDED, UserStatus.INACTIVE])
+async def test_create_offer_rejects_request_with_non_active_creator(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+    creator_status: UserStatus,
+) -> None:
+    seeded = await seed_marketplace_request(
+        session_factory,
+        creator_email=f"non-active-creator-{creator_status.value}@example.com",
+    )
+    _, headers = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email=f"active-offerer-{creator_status.value}@example.com",
+    )
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        creator = await uow.users.get_for_update(seeded["creator_id"])
+        await uow.users.update(replace(creator, status=creator_status))
+        await uow.commit()
+
+    response = await client.post(
+        f"/api/v1/exchange-requests/{seeded['request_id']}/offers",
+        headers=headers,
+        json={"offered_rate": "1490.00"},
+    )
+
+    assert response.status_code == 412
+    assert response.json()["error_code"] == "precondition_failed"
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        request = await uow.exchange_requests.get(seeded["request_id"])
+        assert request.status is ExchangeRequestStatus.REQUEST_OPEN
+        assert await uow.exchange_offers.list_for_request(request.id) == []
+
+
 async def test_update_exchange_offer_persists_rate_and_notifies_request_creator(
     client: AsyncClient,
     auth_service: AuthService,
     session_factory: async_sessionmaker[AsyncSession],
+    mutation_lock_calls: list[tuple[str, UUID]],
 ) -> None:
     seeded = await seed_marketplace_request(
         session_factory, creator_email="offer-update-owner@example.com"
@@ -196,6 +240,7 @@ async def test_update_exchange_offer_persists_rate_and_notifies_request_creator(
         json={"offered_rate": "1490"},
     )
     offer_id = created.json()["id"]
+    mutation_lock_calls.clear()
 
     response = await client.patch(
         f"/api/v1/offers/{offer_id}",
@@ -205,6 +250,13 @@ async def test_update_exchange_offer_persists_rate_and_notifies_request_creator(
 
     assert response.status_code == 200
     assert Decimal(response.json()["offered_rate"]) == Decimal("1510")
+    assert_canonical_mutation_lock_order(mutation_lock_calls)
+    assert [resource for resource, _ in mutation_lock_calls] == [
+        "user",
+        "user",
+        "request",
+        "offer",
+    ]
     creator_view = await client.get(f"/api/v1/offers/{offer_id}", headers=creator_headers)
     assert creator_view.status_code == 200
     assert Decimal(creator_view.json()["offered_rate"]) == Decimal("1510")
@@ -682,6 +734,7 @@ async def test_withdraw_exchange_offer_marks_offer_withdrawn_and_reopens_request
     client: AsyncClient,
     auth_service: AuthService,
     session_factory: async_sessionmaker[AsyncSession],
+    mutation_lock_calls: list[tuple[str, UUID]],
 ) -> None:
     seeded = await seed_marketplace_request(
         session_factory,
@@ -706,6 +759,13 @@ async def test_withdraw_exchange_offer_marks_offer_withdrawn_and_reopens_request
 
     assert response.status_code == 200
     assert response.json()["status"] == "withdrawn"
+    assert_canonical_mutation_lock_order(mutation_lock_calls)
+    assert [resource for resource, _ in mutation_lock_calls] == [
+        "user",
+        "user",
+        "request",
+        "offer",
+    ]
 
     async with SqlAlchemyUnitOfWork(session_factory) as uow:
         reloaded_offer = await uow.exchange_offers.get(offer.id)
@@ -750,6 +810,7 @@ async def test_reject_exchange_offer_marks_offer_rejected_and_reopens_request_if
     client: AsyncClient,
     auth_service: AuthService,
     session_factory: async_sessionmaker[AsyncSession],
+    mutation_lock_calls: list[tuple[str, UUID]],
 ) -> None:
     seeded = await seed_marketplace_request(
         session_factory,
@@ -776,6 +837,13 @@ async def test_reject_exchange_offer_marks_offer_rejected_and_reopens_request_if
 
     assert response.status_code == 200
     assert response.json()["status"] == "rejected"
+    assert_canonical_mutation_lock_order(mutation_lock_calls)
+    assert [resource for resource, _ in mutation_lock_calls] == [
+        "user",
+        "user",
+        "request",
+        "offer",
+    ]
 
     async with SqlAlchemyUnitOfWork(session_factory) as uow:
         reloaded_offer = await uow.exchange_offers.get(offer.id)

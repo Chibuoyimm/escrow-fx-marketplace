@@ -144,8 +144,23 @@ async def test_register_user_succeeds(client: AsyncClient) -> None:
     body = response.json()
     assert body["email"] == "customer@example.com"
     assert body["country"] == "NG"
+    assert body["phone"] == "+2348000000000"
     assert body["email_verified_at"] is None
     assert "password_hash" not in body
+
+
+async def test_register_rejects_non_e164_phone(client: AsyncClient) -> None:
+    response = await client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "invalid-registration-phone@example.com",
+            "password": "ChangeMe123!",
+            "country": "NG",
+            "phone": "08001234567",
+        },
+    )
+
+    assert response.status_code == 422
 
 
 async def test_register_queues_email_verification(

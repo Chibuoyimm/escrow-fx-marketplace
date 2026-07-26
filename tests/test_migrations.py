@@ -7,6 +7,7 @@ from alembic.config import Config
 from sqlalchemy import create_engine, inspect
 
 from alembic import command
+from app.models.account_audit_event import AccountAuditEventModel
 
 
 def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
@@ -44,6 +45,14 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     exchange_offer_columns = {column["name"] for column in inspector.get_columns("exchange_offers")}
     trade_contract_columns = {column["name"] for column in inspector.get_columns("trade_contracts")}
     outbox_event_columns = {column["name"] for column in inspector.get_columns("outbox_events")}
+    account_audit_columns = {
+        column["name"] for column in inspector.get_columns("account_audit_events")
+    }
+    audit_event_column = next(
+        column
+        for column in inspector.get_columns("account_audit_events")
+        if column["name"] == "event_type"
+    )
 
     assert "users" in inspector.get_table_names()
     assert "currencies" in inspector.get_table_names()
@@ -53,6 +62,7 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     assert "exchange_offers" in inspector.get_table_names()
     assert "trade_contracts" in inspector.get_table_names()
     assert "outbox_events" in inspector.get_table_names()
+    assert "account_audit_events" in inspector.get_table_names()
     assert "email_verification_tokens" in inspector.get_table_names()
     assert "password_reset_tokens" in inspector.get_table_names()
     assert "kyc_verifications" in inspector.get_table_names()
@@ -72,6 +82,16 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     assert "accepted_offer_id" in trade_contract_columns
     assert "event_type" in outbox_event_columns
     assert "payload" in outbox_event_columns
+    assert {"subject_user_id", "actor_user_id", "event_type", "occurred_at", "metadata"} <= {
+        *account_audit_columns
+    }
+    assert getattr(audit_event_column["type"], "length", None) == 64
+    assert getattr(AccountAuditEventModel.__table__.c.event_type.type, "length", None) == 64
+    assert {
+        "ix_account_audit_events_subject_occurred",
+        "ix_account_audit_events_actor_occurred",
+        "ix_account_audit_events_event_type",
+    } <= {index["name"] for index in inspector.get_indexes("account_audit_events")}
     request_unique_constraints = {
         constraint["name"] for constraint in inspector.get_unique_constraints("exchange_requests")
     }
@@ -109,6 +129,7 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
         column["name"] for column in downgraded_inspector.get_columns("exchange_requests")
     }
     assert "relisted_from_request_id" not in downgraded_columns
+    assert "account_audit_events" not in downgraded_inspector.get_table_names()
     assert "ix_exchange_requests_creator_created_id" not in {
         index["name"] for index in downgraded_inspector.get_indexes("exchange_requests")
     }

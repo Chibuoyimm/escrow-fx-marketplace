@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.repositories.protocols import (
+    AccountAuditEventRepositoryProtocol,
     CorridorRailRepositoryProtocol,
     CorridorRepositoryProtocol,
     CurrencyRepositoryProtocol,
@@ -20,6 +21,7 @@ from app.repositories.protocols import (
     UserRepositoryProtocol,
 )
 from app.repositories.sqlalchemy import (
+    SqlAlchemyAccountAuditEventRepository,
     SqlAlchemyCorridorRailRepository,
     SqlAlchemyCorridorRepository,
     SqlAlchemyCurrencyRepository,
@@ -38,6 +40,7 @@ class AbstractUnitOfWork(ABC):
     """Transaction boundary for application services."""
 
     users: UserRepositoryProtocol
+    account_audit_events: AccountAuditEventRepositoryProtocol
     email_verification_tokens: EmailVerificationTokenRepositoryProtocol
     password_reset_tokens: PasswordResetTokenRepositoryProtocol
     kyc_verifications: KycVerificationRepositoryProtocol
@@ -76,6 +79,7 @@ class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
     async def __aenter__(self) -> SqlAlchemyUnitOfWork:
         self.session = self._session_factory()
         self.users = SqlAlchemyUserRepository(self.session)
+        self.account_audit_events = SqlAlchemyAccountAuditEventRepository(self.session)
         self.email_verification_tokens = SqlAlchemyEmailVerificationTokenRepository(self.session)
         self.password_reset_tokens = SqlAlchemyPasswordResetTokenRepository(self.session)
         self.kyc_verifications = SqlAlchemyKycVerificationRepository(self.session)

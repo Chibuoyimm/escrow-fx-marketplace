@@ -159,6 +159,104 @@ class OutboxEventPublisher:
             },
         )
 
+    async def user_profile_updated(
+        self,
+        uow: AbstractUnitOfWork,
+        *,
+        user_id: UUID,
+        email: str,
+        changed_fields: list[str],
+        changed_at: str,
+        changed_at_display: str,
+    ) -> OutboxEvent:
+        """Publish a meaningful profile change without exposing field values."""
+        return await self._add(
+            uow,
+            event_type="user.profile_updated",
+            aggregate_type="user",
+            aggregate_id=user_id,
+            recipient_user_id=user_id,
+            payload={
+                "user_id": str(user_id),
+                "email": email,
+                "changed_fields": changed_fields,
+                "changed_at": changed_at,
+                "changed_at_display": changed_at_display,
+            },
+        )
+
+    async def user_account_deactivated(
+        self,
+        uow: AbstractUnitOfWork,
+        *,
+        user_id: UUID,
+        email: str,
+        deactivated_at: str,
+        deactivated_at_display: str,
+    ) -> OutboxEvent:
+        """Publish a self-deactivation security event."""
+        return await self._add(
+            uow,
+            event_type="user.account_deactivated",
+            aggregate_type="user",
+            aggregate_id=user_id,
+            recipient_user_id=user_id,
+            payload={
+                "user_id": str(user_id),
+                "email": email,
+                "deactivated_at": deactivated_at,
+                "deactivated_at_display": deactivated_at_display,
+            },
+        )
+
+    async def user_account_suspended(
+        self,
+        uow: AbstractUnitOfWork,
+        *,
+        user_id: UUID,
+        email: str,
+        changed_at: str,
+        changed_at_display: str,
+    ) -> OutboxEvent:
+        """Publish an administrator suspension security event."""
+        return await self._add(
+            uow,
+            event_type="user.account_suspended",
+            aggregate_type="user",
+            aggregate_id=user_id,
+            recipient_user_id=user_id,
+            payload={
+                "user_id": str(user_id),
+                "email": email,
+                "changed_at": changed_at,
+                "changed_at_display": changed_at_display,
+            },
+        )
+
+    async def user_account_reactivated(
+        self,
+        uow: AbstractUnitOfWork,
+        *,
+        user_id: UUID,
+        email: str,
+        changed_at: str,
+        changed_at_display: str,
+    ) -> OutboxEvent:
+        """Publish an administrator reactivation security event."""
+        return await self._add(
+            uow,
+            event_type="user.account_reactivated",
+            aggregate_type="user",
+            aggregate_id=user_id,
+            recipient_user_id=user_id,
+            payload={
+                "user_id": str(user_id),
+                "email": email,
+                "changed_at": changed_at,
+                "changed_at_display": changed_at_display,
+            },
+        )
+
     async def user_kyc_submitted(
         self,
         uow: AbstractUnitOfWork,
@@ -264,6 +362,8 @@ class OutboxEventPublisher:
         from_currency_code: str,
         to_currency_code: str,
         from_amount: str,
+        preferred_rate: str,
+        min_rate: str | None,
     ) -> OutboxEvent:
         return await self._add(
             uow,
@@ -277,6 +377,8 @@ class OutboxEventPublisher:
                 "from_currency_code": from_currency_code,
                 "to_currency_code": to_currency_code,
                 "from_amount": from_amount,
+                "preferred_rate": preferred_rate,
+                "min_rate": min_rate,
             },
         )
 

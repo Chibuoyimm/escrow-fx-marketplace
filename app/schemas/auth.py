@@ -7,7 +7,9 @@ from typing import Self
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic_core import PydanticCustomError
 
+from app.domain.account import normalize_international_phone
 from app.domain.entities import User
 from app.domain.enums import KycStatus, RiskLevel, UserRole, UserStatus
 
@@ -26,6 +28,17 @@ class RegisterUserRequest(BaseModel):
         """Normalize country codes before validation."""
         if isinstance(value, str):
             return value.strip().upper()
+        return value
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def normalize_phone(cls, value: object) -> object:
+        """Normalize and validate the stored phone representation."""
+        if isinstance(value, str):
+            try:
+                return normalize_international_phone(value)
+            except ValueError as exc:
+                raise PydanticCustomError("phone_format", str(exc)) from exc
         return value
 
 

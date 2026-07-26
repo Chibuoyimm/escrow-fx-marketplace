@@ -6,10 +6,10 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from hashlib import sha256
 from secrets import token_urlsafe
-from typing import Protocol
 from urllib.parse import urlencode
 from uuid import UUID, uuid4
 
+from app.domain.account import normalize_international_phone
 from app.domain.auth import AuthenticatedPrincipal
 from app.domain.entities import EmailVerificationToken, PasswordResetToken, User
 from app.domain.enums import KycStatus, RiskLevel, UserRole, UserStatus
@@ -26,7 +26,6 @@ from app.infrastructure.security import SecurityService
 from app.schemas.auth import AccessTokenResponse
 from app.services._shared import (
     UnitOfWorkFactory,
-    as_utc,
     build_uow,
     format_display_datetime,
     utc_now,
@@ -36,25 +35,6 @@ from app.services.outbox import OutboxEventPublisher
 AUTH_TOKEN_BYTES = 32
 EMAIL_VERIFICATION_FAILED_DETAIL = "Email verification link is invalid or expired."
 PASSWORD_RESET_FAILED_DETAIL = "Password reset link is invalid or expired."
-
-
-class SingleUseToken(Protocol):
-    """Shared shape for auth tokens stored in persistence."""
-
-    @property
-    def id(self) -> UUID: ...
-
-    @property
-    def user_id(self) -> UUID: ...
-
-    @property
-    def token_hash(self) -> str: ...
-
-    @property
-    def expires_at(self) -> datetime: ...
-
-    @property
-    def consumed_at(self) -> datetime | None: ...
 
 
 def normalize_country_code(country: str) -> str:
@@ -119,19 +99,6 @@ class AuthService:
         expires_at = current_time + timedelta(minutes=expiry_minutes)
         return raw_token, current_time, expires_at
 
-    def _assert_token_usable(
-        self,
-        token: SingleUseToken,
-        *,
-        current_time: datetime,
-        failure_detail: str,
-    ) -> None:
-        """Validate that a stored single-use token can still be consumed."""
-        if token.consumed_at is not None:
-            raise PreconditionFailedError(failure_detail)
-        if as_utc(token.expires_at) <= current_time:
-            raise PreconditionFailedError(failure_detail)
-
     async def _queue_email_verification(self, uow: AbstractUnitOfWork, user: User) -> None:
         raw_token, current_time, expires_at = self._new_auth_token(
             settings.email_verification_token_expiry_minutes
@@ -191,6 +158,10 @@ class AuthService:
         """Register a new customer user."""
         normalized_email = normalize_email(email)
         normalized_country = normalize_country_code(country)
+        try:
+            normalized_phone = normalize_international_phone(phone)
+        except ValueError as exc:
+            raise InvariantViolationError(str(exc)) from exc
         async with self._uow_factory() as uow:
             try:
                 await uow.users.get_by_email(normalized_email)
@@ -204,7 +175,7 @@ class AuthService:
                     id=uuid4(),
                     email=normalized_email,
                     password_hash=self._security.hash_password(password),
-                    phone=phone,
+                    phone=normalized_phone,
                     country=normalized_country,
                     role=UserRole.CUSTOMER,
                     status=UserStatus.ACTIVE,
@@ -257,20 +228,14 @@ class AuthService:
         """Verify a user's email address using a single-use token."""
         current_time = utc_now()
         async with self._uow_factory() as uow:
-            try:
-                verification = await uow.email_verification_tokens.get_by_token_hash(
-                    hash_auth_token(token)
-                )
-            except NotFoundError as exc:
-                raise PreconditionFailedError(EMAIL_VERIFICATION_FAILED_DETAIL) from exc
-
-            self._assert_token_usable(
-                verification,
-                current_time=current_time,
-                failure_detail=EMAIL_VERIFICATION_FAILED_DETAIL,
+            verification = await uow.email_verification_tokens.consume(
+                hash_auth_token(token),
+                current_time,
             )
+            if verification is None:
+                raise PreconditionFailedError(EMAIL_VERIFICATION_FAILED_DETAIL)
 
-            user = await uow.users.get(verification.user_id)
+            user = await uow.users.get_for_update(verification.user_id)
             saved = user
             if user.email_verified_at is None:
                 saved = await uow.users.update(
@@ -281,7 +246,6 @@ class AuthService:
                     )
                 )
 
-            await uow.email_verification_tokens.mark_consumed(verification.id, current_time)
             await uow.commit()
             return saved
 
@@ -319,20 +283,14 @@ class AuthService:
         """Reset a user's password using a single-use token."""
         current_time = utc_now()
         async with self._uow_factory() as uow:
-            try:
-                reset_token = await uow.password_reset_tokens.get_by_token_hash(
-                    hash_auth_token(token)
-                )
-            except NotFoundError as exc:
-                raise PreconditionFailedError(PASSWORD_RESET_FAILED_DETAIL) from exc
-
-            self._assert_token_usable(
-                reset_token,
-                current_time=current_time,
-                failure_detail=PASSWORD_RESET_FAILED_DETAIL,
+            reset_token = await uow.password_reset_tokens.consume(
+                hash_auth_token(token),
+                current_time,
             )
+            if reset_token is None:
+                raise PreconditionFailedError(PASSWORD_RESET_FAILED_DETAIL)
 
-            user = await uow.users.get(reset_token.user_id)
+            user = await uow.users.get_for_update(reset_token.user_id)
             if user.status is not UserStatus.ACTIVE:
                 raise PreconditionFailedError(PASSWORD_RESET_FAILED_DETAIL)
 
@@ -343,7 +301,6 @@ class AuthService:
                     updated_at=current_time,
                 )
             )
-            await uow.password_reset_tokens.mark_consumed(reset_token.id, current_time)
             await self._outbox.user_password_reset_completed(
                 uow,
                 user_id=user.id,
@@ -367,6 +324,12 @@ class AuthService:
         current_time = utc_now()
         async with self._uow_factory() as uow:
             user = await uow.users.get(user_id)
+            if user.status is not UserStatus.ACTIVE:
+                raise AuthenticationError("Invalid authentication credentials.")
+            if not self._security.verify_password(current_password, user.password_hash):
+                raise AuthenticationError("Invalid authentication credentials.")
+
+            user = await uow.users.get_for_update(user_id)
             if user.status is not UserStatus.ACTIVE:
                 raise AuthenticationError("Invalid authentication credentials.")
             if not self._security.verify_password(current_password, user.password_hash):
@@ -404,6 +367,10 @@ class AuthService:
         """Create an admin user, or promote one if it already exists."""
         normalized_email = email.lower().strip()
         normalized_country = normalize_country_code(country)
+        try:
+            normalized_phone = normalize_international_phone(phone)
+        except ValueError as exc:
+            raise InvariantViolationError(str(exc)) from exc
         async with self._uow_factory() as uow:
             try:
                 user = await uow.users.get_by_email(normalized_email)
@@ -413,7 +380,7 @@ class AuthService:
                         id=uuid4(),
                         email=normalized_email,
                         password_hash=self._security.hash_password(password),
-                        phone=phone,
+                        phone=normalized_phone,
                         country=normalized_country,
                         role=UserRole.ADMIN,
                         status=UserStatus.ACTIVE,
@@ -427,6 +394,7 @@ class AuthService:
                 await uow.commit()
                 return admin
 
+            user = await uow.users.get_for_update(user.id)
             promoted = replace(
                 user,
                 password_hash=self._security.hash_password(password),
@@ -444,6 +412,7 @@ class AuthService:
         normalized_email = email.lower().strip()
         async with self._uow_factory() as uow:
             user = await uow.users.get_by_email(normalized_email)
+            user = await uow.users.get_for_update(user.id)
             updated = replace(
                 user,
                 role=UserRole.ADMIN,

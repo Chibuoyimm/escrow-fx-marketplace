@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from app.domain.enums import (
+    AccountAuditEventType,
     CorridorStatus,
     CurrencyStatus,
     ExchangeOfferStatus,
@@ -43,6 +44,18 @@ class User:
     email_verified_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AccountAuditEvent:
+    """An append-only account security audit record."""
+
+    id: UUID
+    subject_user_id: UUID
+    actor_user_id: UUID
+    event_type: AccountAuditEventType
+    occurred_at: datetime
+    metadata: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)

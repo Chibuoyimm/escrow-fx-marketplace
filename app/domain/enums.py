@@ -19,6 +19,15 @@ class UserStatus(StrEnum):
     INACTIVE = "inactive"
 
 
+class AccountAuditEventType(StrEnum):
+    """Security-relevant account changes recorded in the audit history."""
+
+    PROFILE_UPDATED = "profile_updated"
+    SELF_DEACTIVATED = "self_deactivated"
+    ADMIN_SUSPENDED = "admin_suspended"
+    ADMIN_REACTIVATED = "admin_reactivated"
+
+
 class KycStatus(StrEnum):
     """KYC lifecycle states."""
 

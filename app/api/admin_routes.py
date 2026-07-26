@@ -29,6 +29,7 @@ from app.schemas.kyc import (
 from app.schemas.outbox import OutboxEventResponse
 from app.schemas.pagination import CursorPage
 from app.schemas.trade import TradeContractResponse
+from app.schemas.user import AdminUserStatusUpdateRequest
 from app.services.admin import AdminService, get_admin_service, resolve_status_filters
 from app.services.kyc import KycService, get_kyc_service
 
@@ -52,6 +53,7 @@ admin_page_size_query = Query(default=50, ge=1, le=100)
 admin_request_statuses_query = Query(default=None)
 admin_offer_statuses_query = Query(default=None)
 admin_trade_statuses_query = Query(default=None)
+admin_management_dependency = Depends(require_roles(UserRole.ADMIN))
 admin_created_from_query = Query(default=None)
 admin_created_to_query = Query(default=None)
 
@@ -71,6 +73,26 @@ async def list_users(
         items=[CurrentUserResponse.model_validate(user) for user in users],
         next_cursor=next_cursor,
     )
+
+
+@admin_router.patch(
+    "/users/{user_id}/status",
+    response_model=CurrentUserResponse,
+    dependencies=[admin_management_dependency],
+)
+async def update_user_status(
+    user_id: UUID,
+    payload: AdminUserStatusUpdateRequest,
+    principal: AuthenticatedPrincipal = principal_dependency,
+    admin_service: AdminService = admin_service_dependency,
+) -> CurrentUserResponse:
+    """Suspend or reactivate a user as an administrator."""
+    user = await admin_service.update_user_status(
+        subject_user_id=user_id,
+        actor_user_id=principal.user_id,
+        status=payload.status,
+    )
+    return CurrentUserResponse.model_validate(user)
 
 
 @admin_router.get("/exchange-requests", response_model=CursorPage[ExchangeRequestResponse])

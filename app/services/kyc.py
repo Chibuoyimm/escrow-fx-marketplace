@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 from hashlib import sha256
 from uuid import UUID, uuid4
 
-from app.domain.entities import KycVerification
+from app.domain.entities import KycVerification, User
 from app.domain.enums import KycIdType, KycStatus, KycVerificationStatus, UserStatus
 from app.domain.exceptions import InvariantViolationError, NotFoundError, PreconditionFailedError
 from app.infrastructure.config import settings
@@ -92,6 +92,16 @@ class KycService:
                     )
                 )
             )
+
+            # The provider call may outlive an account status change. Reload and
+            # lock the current row before persisting any result or user KYC state.
+            user = await uow.users.get_for_update(user.id)
+            if user.status is not UserStatus.ACTIVE:
+                raise PreconditionFailedError("Only active users can submit KYC.")
+            if user.kyc_status is KycStatus.VERIFIED:
+                raise PreconditionFailedError("Your KYC has already been verified.")
+            if user.kyc_status is KycStatus.REQUIRES_REVIEW:
+                raise PreconditionFailedError("Your KYC submission is already under review.")
 
             completed_at = (
                 current_time
@@ -189,6 +199,17 @@ class KycService:
         async with self._uow_factory() as uow:
             return await uow.kyc_verifications.get_latest_for_user(user_id)
 
+    async def _lock_verification_for_mutation(
+        self,
+        uow: AbstractUnitOfWork,
+        verification_id: UUID,
+    ) -> tuple[User, KycVerification]:
+        """Lock the owning user before the KYC row for deterministic mutations."""
+        snapshot = await uow.kyc_verifications.get(verification_id)
+        user = await uow.users.get_for_update(snapshot.user_id)
+        verification = await uow.kyc_verifications.get_for_update(snapshot.id)
+        return user, verification
+
     async def approve_review(
         self,
         *,
@@ -198,7 +219,10 @@ class KycService:
         """Approve a KYC verification that requires manual review."""
         current_time = utc_now()
         async with self._uow_factory() as uow:
-            verification = await uow.kyc_verifications.get(verification_id)
+            user, verification = await self._lock_verification_for_mutation(
+                uow,
+                verification_id,
+            )
             if verification.status is not KycVerificationStatus.REQUIRES_REVIEW:
                 raise PreconditionFailedError(
                     "Only KYC verifications requiring review can be approved."
@@ -220,7 +244,6 @@ class KycService:
                     updated_at=current_time,
                 )
             )
-            user = await uow.users.get(updated.user_id)
             await uow.users.update(
                 replace(
                     user,
@@ -248,7 +271,10 @@ class KycService:
         """Add an internal note to a KYC verification under review."""
         current_time = utc_now()
         async with self._uow_factory() as uow:
-            verification = await uow.kyc_verifications.get(verification_id)
+            _, verification = await self._lock_verification_for_mutation(
+                uow,
+                verification_id,
+            )
             if verification.status is not KycVerificationStatus.REQUIRES_REVIEW:
                 raise PreconditionFailedError(
                     "Only KYC verifications requiring review can receive review notes."
@@ -280,7 +306,10 @@ class KycService:
         """Reject a KYC verification that requires manual review."""
         current_time = utc_now()
         async with self._uow_factory() as uow:
-            verification = await uow.kyc_verifications.get(verification_id)
+            user, verification = await self._lock_verification_for_mutation(
+                uow,
+                verification_id,
+            )
             if verification.status is not KycVerificationStatus.REQUIRES_REVIEW:
                 raise PreconditionFailedError(
                     "Only KYC verifications requiring review can be rejected."
@@ -304,7 +333,6 @@ class KycService:
                     updated_at=current_time,
                 )
             )
-            user = await uow.users.get(updated.user_id)
             await uow.users.update(
                 replace(
                     user,
@@ -334,7 +362,7 @@ class KycService:
                 id_type=verification.id_type,
                 payload=payload,
             )
-            updated = await self._apply_provider_result(uow, verification, result)
+            updated, _ = await self._apply_provider_result(uow, verification, result)
             await uow.commit()
             return updated
 
@@ -353,11 +381,8 @@ class KycService:
                     provider_reference_id=verification.provider_reference_id,
                     id_type=verification.id_type,
                 )
-                updated = await self._apply_provider_result(uow, verification, result)
-                if (
-                    updated.status is not KycVerificationStatus.PENDING
-                    and verification.status is KycVerificationStatus.PENDING
-                ):
+                updated, applied = await self._apply_provider_result(uow, verification, result)
+                if applied:
                     completed += 1
 
             await uow.commit()
@@ -369,22 +394,26 @@ class KycService:
         uow: AbstractUnitOfWork,
         verification: KycVerification,
         result: KycProviderResult,
-    ) -> KycVerification:
+    ) -> tuple[KycVerification, bool]:
         """Apply a provider result to a KYC verification idempotently."""
         result = self._apply_decision_policy(result)
-        if verification.status in {
+        user, current_verification = await self._lock_verification_for_mutation(
+            uow,
+            verification.id,
+        )
+        if current_verification.status in {
             KycVerificationStatus.VERIFIED,
             KycVerificationStatus.REJECTED,
             KycVerificationStatus.REQUIRES_REVIEW,
         }:
-            return verification
+            return current_verification, False
         if result.status is KycVerificationStatus.PENDING:
-            return verification
+            return current_verification, False
 
         current_time = utc_now()
         updated = await uow.kyc_verifications.update(
             replace(
-                verification,
+                current_verification,
                 status=result.status,
                 provider_status=result.provider_status,
                 field_match_summary=result.field_match_summary,
@@ -396,12 +425,11 @@ class KycService:
                     KycVerificationStatus.REJECTED,
                     KycVerificationStatus.REQUIRES_REVIEW,
                 }
-                else verification.completed_at,
+                else current_verification.completed_at,
                 updated_at=current_time,
             )
         )
 
-        user = await uow.users.get(updated.user_id)
         if result.status is KycVerificationStatus.VERIFIED:
             await uow.users.update(
                 replace(
@@ -450,7 +478,7 @@ class KycService:
                 reason=result.rejection_reason or "KYC verification was rejected.",
             )
 
-        return updated
+        return updated, True
 
     async def _enforce_submission_controls(
         self,

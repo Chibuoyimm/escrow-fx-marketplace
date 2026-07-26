@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -36,6 +37,54 @@ from app.domain.enums import (
     UserStatus,
 )
 from app.models import Base
+
+
+def assert_canonical_mutation_lock_order(
+    calls: list[tuple[str, UUID]],
+) -> None:
+    """Assert users, requests, and offers were locked in canonical order."""
+    rank = {"user": 0, "request": 1, "offer": 2}
+    assert calls
+    assert [rank[resource] for resource, _ in calls] == sorted(
+        rank[resource] for resource, _ in calls
+    )
+    for resource in rank:
+        ids = [resource_id for name, resource_id in calls if name == resource]
+        assert ids == sorted(ids, key=lambda value: value.int)
+
+
+@pytest.fixture
+def mutation_lock_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, UUID]]:
+    """Record concrete repository row-lock calls made by a service operation."""
+    from app.repositories.sqlalchemy import (
+        SqlAlchemyExchangeOfferRepository,
+        SqlAlchemyExchangeRequestRepository,
+        SqlAlchemyUserRepository,
+    )
+
+    calls: list[tuple[str, UUID]] = []
+    original_user = SqlAlchemyUserRepository.get_for_update
+    original_request = SqlAlchemyExchangeRequestRepository.get_for_update
+    original_offer = SqlAlchemyExchangeOfferRepository.get_for_update
+
+    async def record_user(repository: Any, user_id: UUID) -> User:
+        calls.append(("user", user_id))
+        return await original_user(repository, user_id)
+
+    async def record_request(repository: Any, request_id: UUID) -> ExchangeRequest:
+        calls.append(("request", request_id))
+        return await original_request(repository, request_id)
+
+    async def record_offer(repository: Any, offer_id: UUID) -> ExchangeOffer:
+        calls.append(("offer", offer_id))
+        return await original_offer(repository, offer_id)
+
+    monkeypatch.setattr(SqlAlchemyUserRepository, "get_for_update", record_user)
+    monkeypatch.setattr(SqlAlchemyExchangeRequestRepository, "get_for_update", record_request)
+    monkeypatch.setattr(SqlAlchemyExchangeOfferRepository, "get_for_update", record_offer)
+    return calls
 
 
 @pytest.fixture

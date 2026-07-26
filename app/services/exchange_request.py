@@ -35,7 +35,14 @@ from app.infrastructure.pagination import (
     normalize_date_range,
     validate_range,
 )
-from app.services._shared import UnitOfWorkFactory, as_utc, build_uow, format_decimal, utc_now
+from app.services._shared import (
+    UnitOfWorkFactory,
+    as_utc,
+    build_uow,
+    format_decimal,
+    lock_users_in_order,
+    utc_now,
+)
 from app.services.outbox import OutboxEventPublisher
 
 
@@ -74,7 +81,7 @@ class ExchangeRequestService:
             raise InvariantViolationError("Minimum rate cannot be greater than preferred rate.")
 
         async with self._uow_factory() as uow:
-            user = await uow.users.get(creator_user_id)
+            user = await uow.users.get_for_update(creator_user_id)
             if user.status is not UserStatus.ACTIVE:
                 raise PreconditionFailedError("Only active users can create exchange requests.")
             if user.kyc_status is not KycStatus.VERIFIED:
@@ -137,6 +144,10 @@ class ExchangeRequestService:
                 from_currency_code=normalized_from,
                 to_currency_code=normalized_to,
                 from_amount=format_decimal(created.from_amount),
+                preferred_rate=format_decimal(created.preferred_rate),
+                min_rate=(
+                    format_decimal(created.min_rate) if created.min_rate is not None else None
+                ),
             )
             await uow.commit()
             return await uow.exchange_requests.get_details_for_user(created.id, user.id)
@@ -220,9 +231,39 @@ class ExchangeRequestService:
         current_time = utc_now()
 
         async with self._uow_factory() as uow:
-            exchange_request = await uow.exchange_requests.get_for_update(request_id)
-            if exchange_request.creator_user_id != requester_user_id:
+            initial_request = await uow.exchange_requests.get(request_id)
+            if initial_request.creator_user_id != requester_user_id:
                 raise NotFoundError(f"Exchange request '{request_id}' was not found.")
+            initial_offers = await uow.exchange_offers.list_for_request(request_id)
+            await lock_users_in_order(
+                uow,
+                (
+                    initial_request.creator_user_id,
+                    *(offer.offer_user_id for offer in initial_offers),
+                ),
+            )
+            exchange_request = await uow.exchange_requests.get_for_update(request_id)
+            if exchange_request.creator_user_id != initial_request.creator_user_id:
+                raise ConflictError("Exchange request participants changed; retry the operation.")
+
+            current_offers = await uow.exchange_offers.list_for_request(request_id)
+            initial_offer_owners = {offer.id: offer.offer_user_id for offer in initial_offers}
+            current_offer_owners = {offer.id: offer.offer_user_id for offer in current_offers}
+            if current_offer_owners != initial_offer_owners:
+                raise ConflictError("Exchange request offers changed; retry the operation.")
+
+            locked_offers = []
+            for current_offer in sorted(current_offers, key=lambda offer: offer.id.int):
+                locked_offer = await uow.exchange_offers.get_for_update(current_offer.id)
+                if (
+                    locked_offer.request_id != exchange_request.id
+                    or locked_offer.offer_user_id != initial_offer_owners[locked_offer.id]
+                ):
+                    raise ConflictError(
+                        "Exchange offer relationships changed; retry the operation."
+                    )
+                locked_offers.append(locked_offer)
+
             if not request_can_be_cancelled(exchange_request.status):
                 raise InvariantViolationError("This exchange request can no longer be cancelled.")
             if as_utc(exchange_request.expires_at) <= current_time:
@@ -236,13 +277,12 @@ class ExchangeRequestService:
                 )
             )
 
-            offers = await uow.exchange_offers.list_for_request(exchange_request.id)
             await self._outbox.exchange_request_cancelled(
                 uow,
                 request_id=exchange_request.id,
                 requester_user_id=requester_user_id,
             )
-            for offer in offers:
+            for offer in locked_offers:
                 if offer.status is not ExchangeOfferStatus.ACTIVE:
                     continue
                 await uow.exchange_offers.update(
@@ -278,11 +318,15 @@ class ExchangeRequestService:
         if not fields:
             raise InvariantViolationError("At least one exchange request term is required.")
         async with self._uow_factory() as uow:
-            user = await uow.users.get(requester_user_id)
+            initial_request = await uow.exchange_requests.get(request_id)
+            if initial_request.creator_user_id != requester_user_id:
+                raise NotFoundError(f"Exchange request '{request_id}' was not found.")
+            users = await lock_users_in_order(uow, (initial_request.creator_user_id,))
+            user = users[initial_request.creator_user_id]
             self._require_active_verified_user(user.status, user.kyc_status)
             request = await uow.exchange_requests.get_for_update(request_id)
-            if request.creator_user_id != requester_user_id:
-                raise NotFoundError(f"Exchange request '{request_id}' was not found.")
+            if request.creator_user_id != initial_request.creator_user_id:
+                raise ConflictError("Exchange request participants changed; retry the operation.")
             if not request_can_be_edited(request.status):
                 raise InvariantViolationError("This exchange request can no longer be edited.")
             if as_utc(request.expires_at) <= current_time:
@@ -329,11 +373,15 @@ class ExchangeRequestService:
         """Create a new request from an expired or cancelled request."""
         current_time = utc_now()
         async with self._uow_factory() as uow:
-            user = await uow.users.get(requester_user_id)
+            initial_request = await uow.exchange_requests.get(request_id)
+            if initial_request.creator_user_id != requester_user_id:
+                raise NotFoundError(f"Exchange request '{request_id}' was not found.")
+            users = await lock_users_in_order(uow, (initial_request.creator_user_id,))
+            user = users[initial_request.creator_user_id]
             self._require_active_verified_user(user.status, user.kyc_status)
             original = await uow.exchange_requests.get_for_update(request_id)
-            if original.creator_user_id != requester_user_id:
-                raise NotFoundError(f"Exchange request '{request_id}' was not found.")
+            if original.creator_user_id != initial_request.creator_user_id:
+                raise ConflictError("Exchange request participants changed; retry the operation.")
             if original.status not in REQUEST_RELISTABLE_STATUSES:
                 raise InvariantViolationError(
                     "Only cancelled or expired exchange requests can be relisted."

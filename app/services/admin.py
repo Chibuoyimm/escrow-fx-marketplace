@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from enum import Enum
 from uuid import UUID
@@ -15,20 +16,30 @@ from app.domain.entities import (
     User,
 )
 from app.domain.enums import (
+    AccountAuditEventType,
     ExchangeOfferStatus,
     ExchangeRequestStatus,
     KycVerificationStatus,
     OutboxEventStatus,
     TradeContractStatus,
+    UserRole,
     UserStatus,
 )
-from app.domain.exceptions import InvariantViolationError
+from app.domain.exceptions import AuthorizationError, InvariantViolationError
 from app.infrastructure.pagination import (
     decode_cursor,
     encode_next_cursor,
     normalize_date_range,
 )
-from app.services._shared import UnitOfWorkFactory, build_uow
+from app.services._shared import (
+    UnitOfWorkFactory,
+    build_uow,
+    format_display_datetime,
+    lock_users_in_order,
+    utc_now,
+)
+from app.services.account import build_account_audit_event
+from app.services.outbox import OutboxEventPublisher
 
 
 def resolve_status_filters[StatusT: Enum](
@@ -44,10 +55,81 @@ def resolve_status_filters[StatusT: Enum](
 
 
 class AdminService:
-    """Application service for read-only admin marketplace inspection."""
+    """Application service for admin inspection and account status management."""
 
-    def __init__(self, uow_factory: UnitOfWorkFactory | None = None) -> None:
+    def __init__(
+        self,
+        uow_factory: UnitOfWorkFactory | None = None,
+        outbox_publisher: OutboxEventPublisher | None = None,
+    ) -> None:
         self._uow_factory = uow_factory or build_uow
+        self._outbox = outbox_publisher or OutboxEventPublisher()
+
+    async def update_user_status(
+        self,
+        *,
+        subject_user_id: UUID,
+        actor_user_id: UUID,
+        status: UserStatus,
+    ) -> User:
+        """Suspend or reactivate a user in the same transaction as its audit event."""
+        if subject_user_id == actor_user_id:
+            raise InvariantViolationError("Administrators cannot change their own account status.")
+        if status is UserStatus.INACTIVE:
+            raise InvariantViolationError("Use the account deactivation flow for inactive status.")
+
+        current_time = utc_now()
+        async with self._uow_factory() as uow:
+            users = await lock_users_in_order(uow, (actor_user_id, subject_user_id))
+            actor = users[actor_user_id]
+            user = users[subject_user_id]
+            if actor.status is not UserStatus.ACTIVE or actor.role is not UserRole.ADMIN:
+                raise AuthorizationError("Administrator access is required.")
+            if user.status is status:
+                return user
+            if status is UserStatus.SUSPENDED and user.status is not UserStatus.ACTIVE:
+                raise InvariantViolationError("Only active users can be suspended.")
+            if status is UserStatus.ACTIVE and user.status not in (
+                UserStatus.SUSPENDED,
+                UserStatus.INACTIVE,
+            ):
+                raise InvariantViolationError(
+                    "Only suspended or inactive users can be reactivated."
+                )
+
+            saved = await uow.users.update(replace(user, status=status, updated_at=current_time))
+            event_type = (
+                AccountAuditEventType.ADMIN_SUSPENDED
+                if status is UserStatus.SUSPENDED
+                else AccountAuditEventType.ADMIN_REACTIVATED
+            )
+            await uow.account_audit_events.add(
+                build_account_audit_event(
+                    subject_user_id=user.id,
+                    actor_user_id=actor_user_id,
+                    event_type=event_type,
+                    occurred_at=current_time,
+                    metadata={"status_from": user.status.value, "status_to": status.value},
+                )
+            )
+            if status is UserStatus.SUSPENDED:
+                await self._outbox.user_account_suspended(
+                    uow,
+                    user_id=user.id,
+                    email=user.email,
+                    changed_at=current_time.isoformat(),
+                    changed_at_display=format_display_datetime(current_time),
+                )
+            else:
+                await self._outbox.user_account_reactivated(
+                    uow,
+                    user_id=user.id,
+                    email=user.email,
+                    changed_at=current_time.isoformat(),
+                    changed_at_display=format_display_datetime(current_time),
+                )
+            await uow.commit()
+            return saved
 
     async def list_users(self, status: UserStatus | None = None) -> list[User]:
         """List users for admin inspection."""
