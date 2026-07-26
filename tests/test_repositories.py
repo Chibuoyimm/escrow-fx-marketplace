@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -290,6 +291,65 @@ async def test_exchange_request_repository_round_trips_and_scopes_by_creator(
 
     with pytest.raises(NotFoundError):
         await exchange_request_repository.get_details_for_user(older_request.id, other_user.id)
+
+
+@pytest.mark.anyio
+async def test_exchange_request_relist_lineage_is_unique_and_round_trips(
+    session: AsyncSession,
+) -> None:
+    user_repository = SqlAlchemyUserRepository(session)
+    currency_repository = SqlAlchemyCurrencyRepository(session)
+    request_repository = SqlAlchemyExchangeRequestRepository(session)
+    creator = await user_repository.add(build_user(email="lineage@example.com"))
+    usd = await currency_repository.add(build_currency(code="USD"))
+    ngn = await currency_repository.add(build_currency(code="NGN"))
+    original = await request_repository.add(
+        build_exchange_request(
+            creator_user_id=creator.id,
+            from_currency_id=usd.id,
+            to_currency_id=ngn.id,
+            status=ExchangeRequestStatus.EXPIRED,
+        )
+    )
+    successor = await request_repository.add(
+        build_exchange_request(
+            creator_user_id=creator.id,
+            from_currency_id=usd.id,
+            to_currency_id=ngn.id,
+            relisted_from_request_id=original.id,
+        )
+    )
+
+    assert (await request_repository.get(successor.id)).relisted_from_request_id == original.id
+    assert await request_repository.has_relisted_successor(original.id) is True
+    with pytest.raises(ConflictError):
+        await request_repository.add(
+            build_exchange_request(
+                creator_user_id=creator.id,
+                from_currency_id=usd.id,
+                to_currency_id=ngn.id,
+                relisted_from_request_id=original.id,
+            )
+        )
+
+
+@pytest.mark.anyio
+async def test_explicit_mutation_repositories_issue_for_update_selects() -> None:
+    session = MagicMock()
+    result = MagicMock()
+    model = MagicMock()
+    model.to_domain.return_value = MagicMock()
+    result.scalar_one_or_none.return_value = model
+    session.execute = AsyncMock(return_value=result)
+
+    await SqlAlchemyExchangeRequestRepository(session).get_for_update(uuid4())
+    request_statement = session.execute.await_args.args[0]
+    assert request_statement._for_update_arg is not None
+    session.execute.reset_mock()
+
+    await SqlAlchemyExchangeOfferRepository(session).get_for_update(uuid4())
+    offer_statement = session.execute.await_args.args[0]
+    assert offer_statement._for_update_arg is not None
 
 
 @pytest.mark.anyio

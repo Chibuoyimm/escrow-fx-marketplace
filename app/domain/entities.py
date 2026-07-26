@@ -166,6 +166,7 @@ class ExchangeRequest:
     """A user-created exchange request."""
 
     id: UUID
+    relisted_from_request_id: UUID | None
     creator_user_id: UUID
     from_currency_id: UUID
     to_currency_id: UUID
@@ -183,6 +184,7 @@ class ExchangeRequestDetails:
     """A customer-facing exchange request projection."""
 
     id: UUID
+    relisted_from_request_id: UUID | None
     creator_user_id: UUID
     from_currency_code: str
     to_currency_code: str
@@ -216,6 +218,12 @@ class ExchangeOfferDetails:
     id: UUID
     request_id: UUID
     offer_user_id: UUID
+    request_status: ExchangeRequestStatus
+    from_currency_code: str
+    to_currency_code: str
+    request_from_amount: Decimal
+    request_preferred_rate: Decimal
+    request_expires_at: datetime
     offered_rate: Decimal
     status: ExchangeOfferStatus
     expires_at: datetime

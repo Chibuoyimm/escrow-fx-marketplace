@@ -67,7 +67,48 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     assert "provider_reference_id" in kyc_verification_columns
     assert "review_events" in kyc_verification_columns
     assert "expires_at" in exchange_request_columns
+    assert "relisted_from_request_id" in exchange_request_columns
     assert "offered_rate" in exchange_offer_columns
     assert "accepted_offer_id" in trade_contract_columns
     assert "event_type" in outbox_event_columns
     assert "payload" in outbox_event_columns
+    request_unique_constraints = {
+        constraint["name"] for constraint in inspector.get_unique_constraints("exchange_requests")
+    }
+    assert "uq_exchange_requests_relisted_from_request_id" in request_unique_constraints
+    request_indexes = {index["name"] for index in inspector.get_indexes("exchange_requests")}
+    offer_indexes = {index["name"] for index in inspector.get_indexes("exchange_offers")}
+    assert "ix_exchange_requests_creator_created_id" in request_indexes
+    assert "ix_exchange_requests_status_created_id" in request_indexes
+    assert "ix_exchange_offers_user_created_id" in offer_indexes
+    assert "ix_exchange_offers_status_created_id" in offer_indexes
+    request_foreign_keys = inspector.get_foreign_keys("exchange_requests")
+    assert any(
+        foreign_key["referred_table"] == "exchange_requests"
+        and foreign_key["constrained_columns"] == ["relisted_from_request_id"]
+        for foreign_key in request_foreign_keys
+    )
+
+    migration_text = Path(
+        "alembic/versions/20260726_0011_add_request_lineage_and_marketplace_indexes.py"
+    ).read_text()
+    assert 'recreate="always"' not in migration_text
+
+    previous = os.environ.get("ALEMBIC_DATABASE_URL")
+    os.environ["ALEMBIC_DATABASE_URL"] = database_url
+    try:
+        command.downgrade(config, "20260628_0010")
+    finally:
+        if previous is None:
+            os.environ.pop("ALEMBIC_DATABASE_URL", None)
+        else:
+            os.environ["ALEMBIC_DATABASE_URL"] = previous
+
+    downgraded_inspector = inspect(engine)
+    downgraded_columns = {
+        column["name"] for column in downgraded_inspector.get_columns("exchange_requests")
+    }
+    assert "relisted_from_request_id" not in downgraded_columns
+    assert "ix_exchange_requests_creator_created_id" not in {
+        index["name"] for index in downgraded_inspector.get_indexes("exchange_requests")
+    }

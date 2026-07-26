@@ -294,8 +294,8 @@ async def test_admin_lists_users_with_status_filter(
 
     assert response.status_code == 200
     body = response.json()
-    assert [user["email"] for user in body] == ["inactive-user@example.com"]
-    assert body[0]["status"] == "inactive"
+    assert [user["email"] for user in body["items"]] == ["inactive-user@example.com"]
+    assert body["items"][0]["status"] == "inactive"
 
 
 async def test_admin_lists_marketplace_records_with_status_filters(
@@ -329,20 +329,44 @@ async def test_admin_lists_marketplace_records_with_status_filters(
     )
 
     assert requests_response.status_code == 200
-    assert [request["id"] for request in requests_response.json()] == [
+    assert [request["id"] for request in requests_response.json()["items"]] == [
         seeded["newer_cancelled_request_id"],
         seeded["older_open_request_id"],
     ]
     assert cancelled_requests_response.status_code == 200
-    assert [request["id"] for request in cancelled_requests_response.json()] == [
+    assert [request["id"] for request in cancelled_requests_response.json()["items"]] == [
         seeded["newer_cancelled_request_id"]
     ]
     assert active_offers_response.status_code == 200
-    assert [offer["id"] for offer in active_offers_response.json()] == [seeded["active_offer_id"]]
+    assert [offer["id"] for offer in active_offers_response.json()["items"]] == [
+        seeded["active_offer_id"]
+    ]
     assert cancelled_trades_response.status_code == 200
-    assert [trade["id"] for trade in cancelled_trades_response.json()] == [
+    assert [trade["id"] for trade in cancelled_trades_response.json()["items"]] == [
         seeded["cancelled_trade_id"]
     ]
+
+
+async def test_admin_rejects_legacy_and_repeated_status_filters_together(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    admin_headers, _ = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="status-filter-admin@example.com",
+        role=UserRole.ADMIN,
+    )
+
+    for path in (
+        "/api/v1/admin/exchange-requests?status=request_open&statuses=request_open",
+        "/api/v1/admin/exchange-offers?status=active&statuses=active",
+        "/api/v1/admin/trades?status=terms_locked&statuses=terms_locked",
+    ):
+        response = await client.get(path, headers=admin_headers)
+        assert response.status_code == 422
+        assert response.json()["error_code"] == "invariant_violation"
 
 
 async def test_admin_lists_outbox_events_with_filters(
@@ -401,15 +425,15 @@ async def test_admin_lists_outbox_events_with_filters(
     )
 
     assert all_response.status_code == 200
-    assert {event["id"] for event in all_response.json()} == {
+    assert {event["id"] for event in all_response.json()["items"]} == {
         str(pending_event.id),
         str(failed_event.id),
     }
     assert pending_response.status_code == 200
-    assert [event["id"] for event in pending_response.json()] == [str(pending_event.id)]
+    assert [event["id"] for event in pending_response.json()["items"]] == [str(pending_event.id)]
     assert type_response.status_code == 200
-    assert [event["id"] for event in type_response.json()] == [str(failed_event.id)]
-    assert type_response.json()[0]["last_error"] == "provider timeout"
+    assert [event["id"] for event in type_response.json()["items"]] == [str(failed_event.id)]
+    assert type_response.json()["items"][0]["last_error"] == "provider timeout"
 
 
 async def test_admin_lists_and_gets_kyc_verifications(
@@ -435,7 +459,9 @@ async def test_admin_lists_and_gets_kyc_verifications(
     )
 
     assert list_response.status_code == 200
-    assert [verification["id"] for verification in list_response.json()] == [verification_id]
+    assert [verification["id"] for verification in list_response.json()["items"]] == [
+        verification_id
+    ]
     assert get_response.status_code == 200
     assert get_response.json()["id"] == verification_id
     assert get_response.json()["status"] == "requires_review"

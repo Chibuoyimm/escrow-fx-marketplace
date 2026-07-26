@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -17,13 +17,25 @@ from app.domain.enums import (
     UserStatus,
 )
 from app.domain.exceptions import (
+    ConflictError,
     InvariantViolationError,
     NotFoundError,
     PreconditionFailedError,
 )
+from app.domain.lifecycle import (
+    REQUEST_RELISTABLE_STATUSES,
+    request_can_be_cancelled,
+    request_can_be_edited,
+)
 from app.domain.value_objects import Money, Rate
 from app.infrastructure.config import settings
-from app.services._shared import UnitOfWorkFactory, as_utc, build_uow, utc_now
+from app.infrastructure.pagination import (
+    decode_cursor,
+    encode_next_cursor,
+    normalize_date_range,
+    validate_range,
+)
+from app.services._shared import UnitOfWorkFactory, as_utc, build_uow, format_decimal, utc_now
 from app.services.outbox import OutboxEventPublisher
 
 
@@ -104,6 +116,7 @@ class ExchangeRequestService:
             created = await uow.exchange_requests.add(
                 ExchangeRequest(
                     id=uuid4(),
+                    relisted_from_request_id=None,
                     creator_user_id=user.id,
                     from_currency_id=from_currency.id,
                     to_currency_id=to_currency.id,
@@ -123,20 +136,70 @@ class ExchangeRequestService:
                 creator_user_id=user.id,
                 from_currency_code=normalized_from,
                 to_currency_code=normalized_to,
-                from_amount=str(created.from_amount),
+                from_amount=format_decimal(created.from_amount),
             )
             await uow.commit()
             return await uow.exchange_requests.get_details_for_user(created.id, user.id)
 
-    async def list_board_requests(self, viewer_user_id: UUID) -> list[ExchangeRequestDetails]:
-        """List board-visible exchange requests for an authenticated viewer."""
+    async def list_board_requests_page(
+        self,
+        viewer_user_id: UUID,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        statuses: tuple[ExchangeRequestStatus, ...] | None = None,
+        from_currency_code: str | None = None,
+        to_currency_code: str | None = None,
+        min_amount: Decimal | None = None,
+        max_amount: Decimal | None = None,
+        min_preferred_rate: Decimal | None = None,
+        max_preferred_rate: Decimal | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[ExchangeRequestDetails], str | None]:
+        """List board requests using stable cursor pagination."""
+        validate_range(min_amount, max_amount, "amount")
+        validate_range(min_preferred_rate, max_preferred_rate, "preferred rate")
+        created_from, created_to = normalize_date_range(created_from, created_to)
         async with self._uow_factory() as uow:
-            return await uow.exchange_requests.list_board_details(viewer_user_id)
+            items, next_position = await uow.exchange_requests.list_board_details_page(
+                viewer_user_id,
+                cursor=decode_cursor(cursor),
+                limit=limit,
+                statuses=statuses,
+                from_currency_code=from_currency_code,
+                to_currency_code=to_currency_code,
+                min_amount=min_amount,
+                max_amount=max_amount,
+                min_preferred_rate=min_preferred_rate,
+                max_preferred_rate=max_preferred_rate,
+                created_from=created_from,
+                created_to=created_to,
+            )
+            return items, encode_next_cursor(next_position)
 
-    async def list_requests_for_user(self, user_id: UUID) -> list[ExchangeRequestDetails]:
-        """List exchange requests created by the authenticated user."""
+    async def list_requests_for_user_page(
+        self,
+        user_id: UUID,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        statuses: tuple[ExchangeRequestStatus, ...] | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[ExchangeRequestDetails], str | None]:
+        """List a user's requests using stable cursor pagination."""
+        created_from, created_to = normalize_date_range(created_from, created_to)
         async with self._uow_factory() as uow:
-            return await uow.exchange_requests.list_details_for_user(user_id)
+            items, next_position = await uow.exchange_requests.list_details_for_user_page(
+                user_id,
+                cursor=decode_cursor(cursor),
+                limit=limit,
+                statuses=statuses,
+                created_from=created_from,
+                created_to=created_to,
+            )
+            return items, encode_next_cursor(next_position)
 
     async def get_visible_request(
         self,
@@ -157,13 +220,10 @@ class ExchangeRequestService:
         current_time = utc_now()
 
         async with self._uow_factory() as uow:
-            exchange_request = await uow.exchange_requests.get(request_id)
+            exchange_request = await uow.exchange_requests.get_for_update(request_id)
             if exchange_request.creator_user_id != requester_user_id:
                 raise NotFoundError(f"Exchange request '{request_id}' was not found.")
-            if exchange_request.status not in {
-                ExchangeRequestStatus.REQUEST_OPEN,
-                ExchangeRequestStatus.OFFER_PENDING,
-            }:
+            if not request_can_be_cancelled(exchange_request.status):
                 raise InvariantViolationError("This exchange request can no longer be cancelled.")
             if as_utc(exchange_request.expires_at) <= current_time:
                 raise InvariantViolationError("This exchange request has already expired.")
@@ -202,6 +262,167 @@ class ExchangeRequestService:
 
             await uow.commit()
             return await uow.exchange_requests.get_details_for_user(request_id, requester_user_id)
+
+    async def update_request(
+        self,
+        *,
+        request_id: UUID,
+        requester_user_id: UUID,
+        fields: set[str],
+        from_amount: Decimal | None,
+        preferred_rate: Decimal | None,
+        min_rate: Decimal | None,
+    ) -> ExchangeRequestDetails:
+        """Update request terms before any offer has ever been submitted."""
+        current_time = utc_now()
+        if not fields:
+            raise InvariantViolationError("At least one exchange request term is required.")
+        async with self._uow_factory() as uow:
+            user = await uow.users.get(requester_user_id)
+            self._require_active_verified_user(user.status, user.kyc_status)
+            request = await uow.exchange_requests.get_for_update(request_id)
+            if request.creator_user_id != requester_user_id:
+                raise NotFoundError(f"Exchange request '{request_id}' was not found.")
+            if not request_can_be_edited(request.status):
+                raise InvariantViolationError("This exchange request can no longer be edited.")
+            if as_utc(request.expires_at) <= current_time:
+                raise InvariantViolationError("This exchange request has expired.")
+            if await uow.exchange_requests.has_any_offers(request_id):
+                raise InvariantViolationError(
+                    "An exchange request cannot be edited after an offer has been submitted."
+                )
+
+            new_amount = from_amount if "from_amount" in fields else request.from_amount
+            new_preferred = preferred_rate if "preferred_rate" in fields else request.preferred_rate
+            new_minimum = min_rate if "min_rate" in fields else request.min_rate
+            from_currency = await uow.currencies.get(request.from_currency_id)
+            if new_amount is None or new_preferred is None:
+                raise InvariantViolationError("Amount and preferred rate cannot be cleared.")
+            self._validate_amount(new_amount, from_currency.min_amount, from_currency.max_amount)
+            preferred = Rate(value=new_preferred)
+            minimum = Rate(value=new_minimum) if new_minimum is not None else None
+            if minimum is not None and minimum.value > preferred.value:
+                raise InvariantViolationError("Minimum rate cannot be greater than preferred rate.")
+
+            await uow.exchange_requests.update(
+                replace(
+                    request,
+                    from_amount=Money(new_amount, from_currency.code).amount,
+                    preferred_rate=preferred.value,
+                    min_rate=minimum.value if minimum is not None else None,
+                    updated_at=current_time,
+                )
+            )
+            await uow.commit()
+            return await uow.exchange_requests.get_details_for_user(request_id, requester_user_id)
+
+    async def relist_request(
+        self,
+        *,
+        request_id: UUID,
+        requester_user_id: UUID,
+        fields: set[str],
+        from_amount: Decimal | None,
+        preferred_rate: Decimal | None,
+        min_rate: Decimal | None,
+    ) -> ExchangeRequestDetails:
+        """Create a new request from an expired or cancelled request."""
+        current_time = utc_now()
+        async with self._uow_factory() as uow:
+            user = await uow.users.get(requester_user_id)
+            self._require_active_verified_user(user.status, user.kyc_status)
+            original = await uow.exchange_requests.get_for_update(request_id)
+            if original.creator_user_id != requester_user_id:
+                raise NotFoundError(f"Exchange request '{request_id}' was not found.")
+            if original.status not in REQUEST_RELISTABLE_STATUSES:
+                raise InvariantViolationError(
+                    "Only cancelled or expired exchange requests can be relisted."
+                )
+            if await uow.exchange_requests.has_relisted_successor(original.id):
+                raise ConflictError("This exchange request has already been relisted.")
+
+            from_currency = await uow.currencies.get(original.from_currency_id)
+            to_currency = await uow.currencies.get(original.to_currency_id)
+            if (
+                from_currency.status is not CurrencyStatus.ACTIVE
+                or to_currency.status is not CurrencyStatus.ACTIVE
+            ):
+                raise NotFoundError(
+                    "The currencies for this exchange request are no longer available."
+                )
+            try:
+                corridor = await uow.corridors.get_by_currency_pair(
+                    from_currency.id, to_currency.id
+                )
+            except NotFoundError as exc:
+                raise NotFoundError(
+                    "An active corridor for this exchange request was not found."
+                ) from exc
+            if corridor.status is not CorridorStatus.ACTIVE:
+                raise NotFoundError("An active corridor for this exchange request was not found.")
+
+            amount = from_amount if "from_amount" in fields else original.from_amount
+            preferred_value = (
+                preferred_rate if "preferred_rate" in fields else original.preferred_rate
+            )
+            minimum_value = min_rate if "min_rate" in fields else original.min_rate
+            if amount is None or preferred_value is None:
+                raise InvariantViolationError("Amount and preferred rate cannot be cleared.")
+            self._validate_amount(amount, from_currency.min_amount, from_currency.max_amount)
+            preferred = Rate(value=preferred_value)
+            minimum = Rate(value=minimum_value) if minimum_value is not None else None
+            if minimum is not None and minimum.value > preferred.value:
+                raise InvariantViolationError("Minimum rate cannot be greater than preferred rate.")
+
+            created = await uow.exchange_requests.add(
+                ExchangeRequest(
+                    id=uuid4(),
+                    relisted_from_request_id=original.id,
+                    creator_user_id=requester_user_id,
+                    from_currency_id=from_currency.id,
+                    to_currency_id=to_currency.id,
+                    from_amount=Money(amount, from_currency.code).amount,
+                    preferred_rate=preferred.value,
+                    min_rate=minimum.value if minimum is not None else None,
+                    status=ExchangeRequestStatus.REQUEST_OPEN,
+                    expires_at=current_time
+                    + timedelta(minutes=settings.exchange_request_expiry_minutes),
+                    created_at=current_time,
+                    updated_at=current_time,
+                )
+            )
+            await self._outbox.exchange_request_relisted(
+                uow,
+                request_id=created.id,
+                original_request_id=original.id,
+                creator_user_id=requester_user_id,
+                from_currency_code=from_currency.code,
+                to_currency_code=to_currency.code,
+                from_amount=format_decimal(created.from_amount),
+                preferred_rate=format_decimal(created.preferred_rate),
+                min_rate=format_decimal(created.min_rate) if created.min_rate is not None else None,
+                expires_at=created.expires_at,
+            )
+            await uow.commit()
+            return await uow.exchange_requests.get_details_for_user(created.id, requester_user_id)
+
+    @staticmethod
+    def _require_active_verified_user(status: UserStatus, kyc_status: KycStatus) -> None:
+        if status is not UserStatus.ACTIVE:
+            raise PreconditionFailedError("Only active users can manage exchange requests.")
+        if kyc_status is not KycStatus.VERIFIED:
+            raise PreconditionFailedError("Verified KYC is required to manage exchange requests.")
+
+    @staticmethod
+    def _validate_amount(amount: Decimal, minimum: Decimal, maximum: Decimal) -> None:
+        if amount < minimum:
+            raise InvariantViolationError(
+                "Amount is below the configured minimum for that currency."
+            )
+        if amount > maximum:
+            raise InvariantViolationError(
+                "Amount exceeds the configured maximum for that currency."
+            )
 
     @staticmethod
     def _normalize_currency_code(code: str) -> str:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -26,8 +27,9 @@ from app.schemas.kyc import (
     KycVerificationResponse,
 )
 from app.schemas.outbox import OutboxEventResponse
+from app.schemas.pagination import CursorPage
 from app.schemas.trade import TradeContractResponse
-from app.services.admin import AdminService, get_admin_service
+from app.services.admin import AdminService, get_admin_service, resolve_status_filters
 from app.services.kyc import KycService, get_kyc_service
 
 admin_router = APIRouter(
@@ -45,72 +47,142 @@ trade_contract_status_query = Query(default=None)
 outbox_event_status_query = Query(default=None)
 outbox_event_type_query = Query(default=None)
 kyc_verification_status_query = Query(default=None)
+admin_cursor_query = Query(default=None)
+admin_page_size_query = Query(default=50, ge=1, le=100)
+admin_request_statuses_query = Query(default=None)
+admin_offer_statuses_query = Query(default=None)
+admin_trade_statuses_query = Query(default=None)
+admin_created_from_query = Query(default=None)
+admin_created_to_query = Query(default=None)
 
 
-@admin_router.get("/users", response_model=list[CurrentUserResponse])
+@admin_router.get("/users", response_model=CursorPage[CurrentUserResponse])
 async def list_users(
     status: UserStatus | None = user_status_query,
+    cursor: str | None = admin_cursor_query,
+    limit: int = admin_page_size_query,
     admin_service: AdminService = admin_service_dependency,
-) -> list[CurrentUserResponse]:
+) -> CursorPage[CurrentUserResponse]:
     """List users for admin inspection."""
-    users = await admin_service.list_users(status)
-    return [CurrentUserResponse.model_validate(user) for user in users]
+    users, next_cursor = await admin_service.list_users_page(
+        status=status, cursor=cursor, limit=limit
+    )
+    return CursorPage(
+        items=[CurrentUserResponse.model_validate(user) for user in users],
+        next_cursor=next_cursor,
+    )
 
 
-@admin_router.get("/exchange-requests", response_model=list[ExchangeRequestResponse])
+@admin_router.get("/exchange-requests", response_model=CursorPage[ExchangeRequestResponse])
 async def list_exchange_requests(
     status: ExchangeRequestStatus | None = exchange_request_status_query,
+    statuses: list[ExchangeRequestStatus] | None = admin_request_statuses_query,
+    cursor: str | None = admin_cursor_query,
+    limit: int = admin_page_size_query,
+    created_from: datetime | None = admin_created_from_query,
+    created_to: datetime | None = admin_created_to_query,
     admin_service: AdminService = admin_service_dependency,
-) -> list[ExchangeRequestResponse]:
+) -> CursorPage[ExchangeRequestResponse]:
     """List exchange requests for admin inspection."""
-    exchange_requests = await admin_service.list_exchange_requests(status)
-    return [
-        ExchangeRequestResponse.model_validate(exchange_request)
-        for exchange_request in exchange_requests
-    ]
+    filters = resolve_status_filters(status, statuses)
+    items, next_cursor = await admin_service.list_exchange_requests_page(
+        statuses=filters,
+        cursor=cursor,
+        limit=limit,
+        created_from=created_from,
+        created_to=created_to,
+    )
+    return CursorPage(
+        items=[ExchangeRequestResponse.model_validate(item) for item in items],
+        next_cursor=next_cursor,
+    )
 
 
-@admin_router.get("/exchange-offers", response_model=list[ExchangeOfferResponse])
+@admin_router.get("/exchange-offers", response_model=CursorPage[ExchangeOfferResponse])
 async def list_exchange_offers(
     status: ExchangeOfferStatus | None = exchange_offer_status_query,
+    statuses: list[ExchangeOfferStatus] | None = admin_offer_statuses_query,
+    cursor: str | None = admin_cursor_query,
+    limit: int = admin_page_size_query,
+    created_from: datetime | None = admin_created_from_query,
+    created_to: datetime | None = admin_created_to_query,
     admin_service: AdminService = admin_service_dependency,
-) -> list[ExchangeOfferResponse]:
+) -> CursorPage[ExchangeOfferResponse]:
     """List exchange offers for admin inspection."""
-    exchange_offers = await admin_service.list_exchange_offers(status)
-    return [
-        ExchangeOfferResponse.model_validate(exchange_offer) for exchange_offer in exchange_offers
-    ]
+    filters = resolve_status_filters(status, statuses)
+    items, next_cursor = await admin_service.list_exchange_offers_page(
+        statuses=filters,
+        cursor=cursor,
+        limit=limit,
+        created_from=created_from,
+        created_to=created_to,
+    )
+    return CursorPage(
+        items=[ExchangeOfferResponse.model_validate(item) for item in items],
+        next_cursor=next_cursor,
+    )
 
 
-@admin_router.get("/trades", response_model=list[TradeContractResponse])
+@admin_router.get("/trades", response_model=CursorPage[TradeContractResponse])
 async def list_trades(
     status: TradeContractStatus | None = trade_contract_status_query,
+    statuses: list[TradeContractStatus] | None = admin_trade_statuses_query,
+    cursor: str | None = admin_cursor_query,
+    limit: int = admin_page_size_query,
+    created_from: datetime | None = admin_created_from_query,
+    created_to: datetime | None = admin_created_to_query,
     admin_service: AdminService = admin_service_dependency,
-) -> list[TradeContractResponse]:
+) -> CursorPage[TradeContractResponse]:
     """List trade contracts for admin inspection."""
-    trades = await admin_service.list_trades(status)
-    return [TradeContractResponse.model_validate(trade) for trade in trades]
+    filters = resolve_status_filters(status, statuses)
+    items, next_cursor = await admin_service.list_trades_page(
+        statuses=filters,
+        cursor=cursor,
+        limit=limit,
+        created_from=created_from,
+        created_to=created_to,
+    )
+    return CursorPage(
+        items=[TradeContractResponse.model_validate(item) for item in items],
+        next_cursor=next_cursor,
+    )
 
 
-@admin_router.get("/events", response_model=list[OutboxEventResponse])
+@admin_router.get("/events", response_model=CursorPage[OutboxEventResponse])
 async def list_events(
     status: OutboxEventStatus | None = outbox_event_status_query,
     event_type: str | None = outbox_event_type_query,
+    cursor: str | None = admin_cursor_query,
+    limit: int = admin_page_size_query,
     admin_service: AdminService = admin_service_dependency,
-) -> list[OutboxEventResponse]:
+) -> CursorPage[OutboxEventResponse]:
     """List outbox events for admin inspection."""
-    events = await admin_service.list_events(status=status, event_type=event_type)
-    return [OutboxEventResponse.model_validate(event) for event in events]
+    events, next_cursor = await admin_service.list_events_page(
+        status=status, event_type=event_type, cursor=cursor, limit=limit
+    )
+    return CursorPage(
+        items=[OutboxEventResponse.model_validate(event) for event in events],
+        next_cursor=next_cursor,
+    )
 
 
-@admin_router.get("/kyc", response_model=list[KycVerificationResponse])
+@admin_router.get("/kyc", response_model=CursorPage[KycVerificationResponse])
 async def list_kyc_verifications(
     status: KycVerificationStatus | None = kyc_verification_status_query,
+    cursor: str | None = admin_cursor_query,
+    limit: int = admin_page_size_query,
     admin_service: AdminService = admin_service_dependency,
-) -> list[KycVerificationResponse]:
+) -> CursorPage[KycVerificationResponse]:
     """List KYC verification attempts for admin inspection."""
-    verifications = await admin_service.list_kyc_verifications(status)
-    return [KycVerificationResponse.model_validate(verification) for verification in verifications]
+    verifications, next_cursor = await admin_service.list_kyc_verifications_page(
+        status=status, cursor=cursor, limit=limit
+    )
+    return CursorPage(
+        items=[
+            KycVerificationResponse.model_validate(verification) for verification in verifications
+        ],
+        next_cursor=next_cursor,
+    )
 
 
 @admin_router.get("/kyc/{verification_id}", response_model=KycVerificationResponse)

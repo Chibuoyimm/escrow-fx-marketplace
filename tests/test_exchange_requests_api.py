@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID
 
 import pytest
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.domain.enums import (
     CorridorStatus,
     CurrencyStatus,
+    ExchangeOfferStatus,
     ExchangeRequestStatus,
     KycStatus,
     UserStatus,
@@ -142,6 +144,30 @@ async def seed_currencies_only(
     }
 
 
+async def seed_request_for_user(
+    session_factory: async_sessionmaker[AsyncSession],
+    auth_service: AuthService,
+    *,
+    email: str,
+    status: ExchangeRequestStatus = ExchangeRequestStatus.REQUEST_OPEN,
+    expires_at: datetime | None = None,
+) -> tuple[dict[str, UUID], dict[str, str]]:
+    currencies = await seed_currencies_and_corridor(session_factory)
+    user_id, headers = await create_user_and_token(session_factory, auth_service, email=email)
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        request = await uow.exchange_requests.add(
+            build_exchange_request(
+                creator_user_id=user_id,
+                from_currency_id=currencies["from_currency_id"],
+                to_currency_id=currencies["to_currency_id"],
+                status=status,
+                expires_at=expires_at or (datetime.now(UTC) + timedelta(hours=1)),
+            )
+        )
+        await uow.commit()
+    return {"request_id": request.id, "user_id": user_id}, headers
+
+
 async def test_create_exchange_request_succeeds_for_verified_user(
     client: AsyncClient,
     auth_service: AuthService,
@@ -186,6 +212,460 @@ async def test_create_exchange_request_succeeds_for_verified_user(
     assert events[0].aggregate_id == UUID(body["id"])
     assert events[0].recipient_user_id == user_id
     assert events[0].payload["from_currency_code"] == "USD"
+
+
+async def test_update_exchange_request_persists_terms_without_extending_expiry(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded, headers = await seed_request_for_user(
+        session_factory, auth_service, email="request-editor@example.com"
+    )
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        original = await uow.exchange_requests.get(seeded["request_id"])
+
+    response = await client.patch(
+        f"/api/v1/exchange-requests/{seeded['request_id']}",
+        headers=headers,
+        json={"from_amount": "250.00", "preferred_rate": "1520.00", "min_rate": "1500.00"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert Decimal(body["from_amount"]) == Decimal("250.00")
+    assert Decimal(body["preferred_rate"]) == Decimal("1520.00")
+    assert Decimal(body["min_rate"]) == Decimal("1500.00")
+    assert datetime.fromisoformat(body["expires_at"].replace("Z", "+00:00")) == original.expires_at
+
+
+async def test_update_exchange_request_rejects_historical_offers(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded, owner_headers = await seed_request_for_user(
+        session_factory,
+        auth_service,
+        email="historical-request-owner@example.com",
+        status=ExchangeRequestStatus.OFFER_PENDING,
+    )
+    _, offer_headers = await create_user_and_token(
+        session_factory, auth_service, email="historical-offer-owner@example.com"
+    )
+    await client.post(
+        f"/api/v1/exchange-requests/{seeded['request_id']}/offers",
+        headers=offer_headers,
+        json={"offered_rate": "1490"},
+    )
+
+    response = await client.patch(
+        f"/api/v1/exchange-requests/{seeded['request_id']}",
+        headers=owner_headers,
+        json={"preferred_rate": "1520"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error_code"] == "invariant_violation"
+
+
+async def test_update_exchange_request_rejects_withdrawn_historical_offers(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded, owner_headers = await seed_request_for_user(
+        session_factory, auth_service, email="withdrawn-history-owner@example.com"
+    )
+    offer_user_id, _ = await create_user_and_token(
+        session_factory, auth_service, email="withdrawn-history-offerer@example.com"
+    )
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        request = await uow.exchange_requests.get(seeded["request_id"])
+        offer = await uow.exchange_offers.add(
+            build_exchange_offer(
+                request_id=request.id,
+                offer_user_id=offer_user_id,
+                status=ExchangeOfferStatus.WITHDRAWN,
+            )
+        )
+        await uow.commit()
+
+    response = await client.patch(
+        f"/api/v1/exchange-requests/{seeded['request_id']}",
+        headers=owner_headers,
+        json={"preferred_rate": "1520"},
+    )
+
+    assert offer.status is ExchangeOfferStatus.WITHDRAWN
+    assert response.status_code == 422
+    assert response.json()["error_code"] == "invariant_violation"
+
+
+async def test_update_exchange_request_rejects_empty_patch_and_can_clear_min_rate(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded, headers = await seed_request_for_user(
+        session_factory, auth_service, email="empty-patch-owner@example.com"
+    )
+
+    empty_response = await client.patch(
+        f"/api/v1/exchange-requests/{seeded['request_id']}",
+        headers=headers,
+        json={},
+    )
+    clear_response = await client.patch(
+        f"/api/v1/exchange-requests/{seeded['request_id']}",
+        headers=headers,
+        json={"min_rate": None},
+    )
+
+    assert empty_response.status_code == 422
+    assert empty_response.json()["error_code"] == "invariant_violation"
+    assert clear_response.status_code == 200
+    assert clear_response.json()["min_rate"] is None
+
+
+async def test_update_exchange_request_enforces_owner_guards_and_term_validation(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded, owner_headers = await seed_request_for_user(
+        session_factory, auth_service, email="patch-owner@example.com"
+    )
+    _, other_headers = await create_user_and_token(
+        session_factory, auth_service, email="patch-other@example.com"
+    )
+
+    ownership_response = await client.patch(
+        f"/api/v1/exchange-requests/{seeded['request_id']}",
+        headers=other_headers,
+        json={"from_amount": "200"},
+    )
+    invalid_amount_response = await client.patch(
+        f"/api/v1/exchange-requests/{seeded['request_id']}",
+        headers=owner_headers,
+        json={"from_amount": "0.01"},
+    )
+    invalid_rate_response = await client.patch(
+        f"/api/v1/exchange-requests/{seeded['request_id']}",
+        headers=owner_headers,
+        json={"preferred_rate": "1400", "min_rate": "1450"},
+    )
+
+    assert ownership_response.status_code == 404
+    assert invalid_amount_response.status_code == 422
+    assert invalid_rate_response.status_code == 422
+
+
+async def test_update_exchange_request_rejects_expired_and_terminal_requests(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded, headers = await seed_request_for_user(
+        session_factory, auth_service, email="request-state-editor@example.com"
+    )
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        request = await uow.exchange_requests.get(seeded["request_id"])
+        await uow.exchange_requests.update(
+            replace(request, expires_at=datetime.now(UTC) - timedelta(minutes=1))
+        )
+        await uow.commit()
+
+    expired_response = await client.patch(
+        f"/api/v1/exchange-requests/{seeded['request_id']}",
+        headers=headers,
+        json={"preferred_rate": "1520"},
+    )
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        request = await uow.exchange_requests.get(seeded["request_id"])
+        await uow.exchange_requests.update(
+            replace(
+                request,
+                status=ExchangeRequestStatus.TERMS_LOCKED,
+                expires_at=datetime.now(UTC) + timedelta(hours=1),
+            )
+        )
+        await uow.commit()
+
+    terminal_response = await client.patch(
+        f"/api/v1/exchange-requests/{seeded['request_id']}",
+        headers=headers,
+        json={"preferred_rate": "1520"},
+    )
+
+    assert expired_response.status_code == 422
+    assert terminal_response.status_code == 422
+    assert expired_response.json()["error_code"] == "invariant_violation"
+    assert terminal_response.json()["error_code"] == "invariant_violation"
+
+
+async def test_relist_creates_new_request_and_preserves_terminal_original(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded, headers = await seed_request_for_user(
+        session_factory,
+        auth_service,
+        email="relist-owner@example.com",
+        status=ExchangeRequestStatus.EXPIRED,
+        expires_at=datetime.now(UTC) - timedelta(minutes=1),
+    )
+
+    response = await client.post(
+        f"/api/v1/exchange-requests/{seeded['request_id']}/relist",
+        headers=headers,
+        json={"from_amount": "350", "min_rate": "1400"},
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["id"] != str(seeded["request_id"])
+    assert body["status"] == "request_open"
+    assert body["relisted_from_request_id"] == str(seeded["request_id"])
+    assert Decimal(body["from_amount"]) == Decimal("350")
+    assert Decimal(body["preferred_rate"]) == Decimal("1500")
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        original = await uow.exchange_requests.get(seeded["request_id"])
+        assert original.status is ExchangeRequestStatus.EXPIRED
+        events = await uow.outbox_events.list_admin(event_type="exchange_request.relisted")
+        assert len(events) == 1
+        assert events[0].aggregate_id == UUID(body["id"])
+        assert events[0].payload["original_request_id"] == str(seeded["request_id"])
+        assert events[0].payload["from_currency_code"] == "USD"
+        assert events[0].payload["to_currency_code"] == "NGN"
+        assert events[0].payload["from_amount"] == "350"
+        assert events[0].payload["preferred_rate"] == "1500"
+        assert events[0].payload["min_rate"] == "1400"
+        assert events[0].payload["expires_at"].endswith("+00:00")
+        assert " at " in events[0].payload["expires_at_display"]
+
+    duplicate_response = await client.post(
+        f"/api/v1/exchange-requests/{seeded['request_id']}/relist",
+        headers=headers,
+        json={},
+    )
+    assert duplicate_response.status_code == 409
+    assert duplicate_response.json()["error_code"] == "conflict"
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        successor = await uow.exchange_requests.get(UUID(body["id"]))
+        await uow.exchange_requests.update(
+            replace(
+                successor,
+                status=ExchangeRequestStatus.EXPIRED,
+                expires_at=datetime.now(UTC) - timedelta(minutes=1),
+            )
+        )
+        await uow.commit()
+    chained_response = await client.post(
+        f"/api/v1/exchange-requests/{successor.id}/relist",
+        headers=headers,
+        json={},
+    )
+    assert chained_response.status_code == 201
+    assert chained_response.json()["relisted_from_request_id"] == str(successor.id)
+
+
+async def test_relist_requires_owner_terminal_state_and_valid_replacement_terms(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    open_request, owner_headers = await seed_request_for_user(
+        session_factory, auth_service, email="relist-open-owner@example.com"
+    )
+    _, other_headers = await create_user_and_token(
+        session_factory, auth_service, email="relist-other@example.com"
+    )
+
+    ownership_response = await client.post(
+        f"/api/v1/exchange-requests/{open_request['request_id']}/relist",
+        headers=other_headers,
+        json={},
+    )
+    state_response = await client.post(
+        f"/api/v1/exchange-requests/{open_request['request_id']}/relist",
+        headers=owner_headers,
+        json={},
+    )
+
+    terminal_user_id, terminal_headers = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email="relist-invalid-terms@example.com",
+    )
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        open_request_row = await uow.exchange_requests.get(open_request["request_id"])
+        terminal_request = await uow.exchange_requests.add(
+            build_exchange_request(
+                creator_user_id=terminal_user_id,
+                from_currency_id=open_request_row.from_currency_id,
+                to_currency_id=open_request_row.to_currency_id,
+                status=ExchangeRequestStatus.CANCELLED,
+            )
+        )
+        await uow.commit()
+    invalid_response = await client.post(
+        f"/api/v1/exchange-requests/{terminal_request.id}/relist",
+        headers=terminal_headers,
+        json={"preferred_rate": "1400", "min_rate": "1450"},
+    )
+
+    assert ownership_response.status_code == 404
+    assert state_response.status_code == 422
+    assert invalid_response.status_code == 422
+
+
+async def test_exchange_request_board_supports_cursor_and_term_filters(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    currencies = await seed_currencies_and_corridor(session_factory)
+    _, viewer_headers = await create_user_and_token(
+        session_factory, auth_service, email="board-page-viewer@example.com"
+    )
+    first_id, _ = await create_user_and_token(
+        session_factory, auth_service, email="board-page-first@example.com"
+    )
+    second_id, _ = await create_user_and_token(
+        session_factory, auth_service, email="board-page-second@example.com"
+    )
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        older = await uow.exchange_requests.add(
+            build_exchange_request(
+                creator_user_id=first_id,
+                from_currency_id=currencies["from_currency_id"],
+                to_currency_id=currencies["to_currency_id"],
+                from_amount=Decimal("100"),
+                preferred_rate=Decimal("1400"),
+                created_at=datetime.now(UTC) - timedelta(minutes=2),
+            )
+        )
+        newer = await uow.exchange_requests.add(
+            build_exchange_request(
+                creator_user_id=second_id,
+                from_currency_id=currencies["from_currency_id"],
+                to_currency_id=currencies["to_currency_id"],
+                from_amount=Decimal("300"),
+                preferred_rate=Decimal("1500"),
+                created_at=datetime.now(UTC) - timedelta(minutes=1),
+            )
+        )
+        await uow.commit()
+
+    first_page = await client.get(
+        "/api/v1/exchange-requests?limit=1&min_amount=200&min_preferred_rate=1450",
+        headers=viewer_headers,
+    )
+
+    assert first_page.status_code == 200
+    assert [item["id"] for item in first_page.json()["items"]] == [str(newer.id)]
+    assert first_page.json()["next_cursor"] is None
+    paginated_first = await client.get(
+        "/api/v1/exchange-requests?limit=1",
+        headers=viewer_headers,
+    )
+    assert paginated_first.json()["next_cursor"] is not None
+    second_page = await client.get(
+        f"/api/v1/exchange-requests?limit=1&cursor={paginated_first.json()['next_cursor']}",
+        headers=viewer_headers,
+    )
+    assert second_page.status_code == 200
+    assert [item["id"] for item in second_page.json()["items"]] == [str(older.id)]
+    assert second_page.json()["next_cursor"] is None
+
+
+async def test_exchange_request_filters_validate_ranges_dates_and_equal_timestamp_cursor(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    currencies = await seed_currencies_and_corridor(session_factory)
+    _, viewer_headers = await create_user_and_token(
+        session_factory, auth_service, email="range-viewer@example.com"
+    )
+    creators = [
+        (
+            await create_user_and_token(
+                session_factory, auth_service, email=f"equal-time-{index}@example.com"
+            )
+        )[0]
+        for index in range(3)
+    ]
+    timestamp = datetime.now(UTC) - timedelta(minutes=1)
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        for creator_id in creators:
+            await uow.exchange_requests.add(
+                build_exchange_request(
+                    creator_user_id=creator_id,
+                    from_currency_id=currencies["from_currency_id"],
+                    to_currency_id=currencies["to_currency_id"],
+                    created_at=timestamp,
+                )
+            )
+        await uow.commit()
+
+    invalid_range = await client.get(
+        "/api/v1/exchange-requests?min_amount=200&max_amount=100",
+        headers=viewer_headers,
+    )
+    invalid_rate_range = await client.get(
+        "/api/v1/exchange-requests?min_preferred_rate=1500&max_preferred_rate=1400",
+        headers=viewer_headers,
+    )
+    invalid_dates = await client.get(
+        "/api/v1/exchange-requests"
+        "?created_from=2026-07-02T00:00:00Z&created_to=2026-07-01T00:00:00Z",
+        headers=viewer_headers,
+    )
+    mixed_timezone_dates = await client.get(
+        "/api/v1/exchange-requests"
+        "?created_from=2026-07-01T00:00:00&created_to=2026-07-27T00:00:00Z",
+        headers=viewer_headers,
+    )
+    malformed_cursor = await client.get(
+        "/api/v1/exchange-requests?cursor=not-a-cursor",
+        headers=viewer_headers,
+    )
+    first = await client.get(
+        "/api/v1/exchange-requests?limit=1",
+        headers=viewer_headers,
+    )
+    second = await client.get(
+        f"/api/v1/exchange-requests?limit=1&cursor={first.json()['next_cursor']}",
+        headers=viewer_headers,
+    )
+    third = await client.get(
+        f"/api/v1/exchange-requests?limit=1&cursor={second.json()['next_cursor']}",
+        headers=viewer_headers,
+    )
+
+    assert invalid_range.status_code == 422
+    assert invalid_range.json()["error_code"] == "invariant_violation"
+    assert invalid_rate_range.status_code == 422
+    assert invalid_rate_range.json()["error_code"] == "invariant_violation"
+    assert invalid_dates.status_code == 422
+    assert mixed_timezone_dates.status_code == 200
+    assert malformed_cursor.status_code == 422
+    assert (
+        len(
+            {
+                first.json()["items"][0]["id"],
+                second.json()["items"][0]["id"],
+                third.json()["items"][0]["id"],
+            }
+        )
+        == 3
+    )
 
 
 async def test_create_exchange_request_requires_authentication(client: AsyncClient) -> None:
@@ -484,8 +964,8 @@ async def test_list_exchange_requests_returns_board_visible_requests(
 
     assert response.status_code == 200
     body = response.json()
-    assert [request["id"] for request in body] == [str(visible_request.id)]
-    assert all(request["creator_user_id"] != str(viewer_id) for request in body)
+    assert [request["id"] for request in body["items"]] == [str(visible_request.id)]
+    assert all(request["creator_user_id"] != str(viewer_id) for request in body["items"])
 
 
 async def test_list_my_exchange_requests_returns_only_authenticated_users_requests(
@@ -531,8 +1011,11 @@ async def test_list_my_exchange_requests_returns_only_authenticated_users_reques
 
     assert response.status_code == 200
     body = response.json()
-    assert [request["id"] for request in body] == [str(newer_request.id), str(older_request.id)]
-    assert all(request["creator_user_id"] == str(user_id) for request in body)
+    assert [request["id"] for request in body["items"]] == [
+        str(newer_request.id),
+        str(older_request.id),
+    ]
+    assert all(request["creator_user_id"] == str(user_id) for request in body["items"])
 
 
 async def test_get_exchange_request_by_id_returns_own_or_board_visible_request(

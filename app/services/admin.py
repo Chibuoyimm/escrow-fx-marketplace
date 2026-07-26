@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from enum import Enum
 from uuid import UUID
 
 from app.domain.entities import (
@@ -20,7 +22,25 @@ from app.domain.enums import (
     TradeContractStatus,
     UserStatus,
 )
+from app.domain.exceptions import InvariantViolationError
+from app.infrastructure.pagination import (
+    decode_cursor,
+    encode_next_cursor,
+    normalize_date_range,
+)
 from app.services._shared import UnitOfWorkFactory, build_uow
+
+
+def resolve_status_filters[StatusT: Enum](
+    status: StatusT | None,
+    statuses: list[StatusT] | None,
+) -> tuple[StatusT, ...] | None:
+    """Resolve legacy singular and paginated repeated status filters."""
+    if status is not None and statuses:
+        raise InvariantViolationError("Use either status or statuses, not both.")
+    if statuses:
+        return tuple(statuses)
+    return (status,) if status is not None else None
 
 
 class AdminService:
@@ -34,29 +54,74 @@ class AdminService:
         async with self._uow_factory() as uow:
             return await uow.users.list_all(status)
 
-    async def list_exchange_requests(
-        self,
-        status: ExchangeRequestStatus | None = None,
-    ) -> list[ExchangeRequestDetails]:
-        """List exchange requests for admin inspection."""
+    async def list_users_page(
+        self, *, status: UserStatus | None = None, cursor: str | None = None, limit: int = 50
+    ) -> tuple[list[User], str | None]:
         async with self._uow_factory() as uow:
-            return await uow.exchange_requests.list_admin_details(status)
+            items, position = await uow.users.list_page(
+                status=status, cursor=decode_cursor(cursor), limit=limit
+            )
+            return items, encode_next_cursor(position)
 
-    async def list_exchange_offers(
+    async def list_exchange_requests_page(
         self,
-        status: ExchangeOfferStatus | None = None,
-    ) -> list[ExchangeOfferDetails]:
-        """List exchange offers for admin inspection."""
+        *,
+        statuses: tuple[ExchangeRequestStatus, ...] | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[ExchangeRequestDetails], str | None]:
+        created_from, created_to = normalize_date_range(created_from, created_to)
         async with self._uow_factory() as uow:
-            return await uow.exchange_offers.list_admin_details(status)
+            items, position = await uow.exchange_requests.list_admin_details_page(
+                statuses=statuses,
+                cursor=decode_cursor(cursor),
+                limit=limit,
+                created_from=created_from,
+                created_to=created_to,
+            )
+            return items, encode_next_cursor(position)
 
-    async def list_trades(
+    async def list_exchange_offers_page(
         self,
-        status: TradeContractStatus | None = None,
-    ) -> list[TradeContractDetails]:
-        """List trade contracts for admin inspection."""
+        *,
+        statuses: tuple[ExchangeOfferStatus, ...] | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[ExchangeOfferDetails], str | None]:
+        created_from, created_to = normalize_date_range(created_from, created_to)
         async with self._uow_factory() as uow:
-            return await uow.trade_contracts.list_admin_details(status)
+            items, position = await uow.exchange_offers.list_admin_details_page(
+                statuses=statuses,
+                cursor=decode_cursor(cursor),
+                limit=limit,
+                created_from=created_from,
+                created_to=created_to,
+            )
+            return items, encode_next_cursor(position)
+
+    async def list_trades_page(
+        self,
+        *,
+        statuses: tuple[TradeContractStatus, ...] | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[TradeContractDetails], str | None]:
+        created_from, created_to = normalize_date_range(created_from, created_to)
+        async with self._uow_factory() as uow:
+            items, position = await uow.trade_contracts.list_admin_details_page(
+                statuses=statuses,
+                cursor=decode_cursor(cursor),
+                limit=limit,
+                created_from=created_from,
+                created_to=created_to,
+            )
+            return items, encode_next_cursor(position)
 
     async def list_events(
         self,
@@ -68,6 +133,23 @@ class AdminService:
         async with self._uow_factory() as uow:
             return await uow.outbox_events.list_admin(status, event_type)
 
+    async def list_events_page(
+        self,
+        *,
+        status: OutboxEventStatus | None = None,
+        event_type: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> tuple[list[OutboxEvent], str | None]:
+        async with self._uow_factory() as uow:
+            items, position = await uow.outbox_events.list_admin_page(
+                status=status,
+                event_type=event_type,
+                cursor=decode_cursor(cursor),
+                limit=limit,
+            )
+            return items, encode_next_cursor(position)
+
     async def list_kyc_verifications(
         self,
         status: KycVerificationStatus | None = None,
@@ -75,6 +157,21 @@ class AdminService:
         """List KYC verification attempts for admin inspection."""
         async with self._uow_factory() as uow:
             return await uow.kyc_verifications.list_admin(status)
+
+    async def list_kyc_verifications_page(
+        self,
+        *,
+        status: KycVerificationStatus | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> tuple[list[KycVerification], str | None]:
+        async with self._uow_factory() as uow:
+            items, position = await uow.kyc_verifications.list_admin_page(
+                status=status,
+                cursor=decode_cursor(cursor),
+                limit=limit,
+            )
+            return items, encode_next_cursor(position)
 
     async def get_kyc_verification(self, verification_id: str) -> KycVerification:
         """Fetch a KYC verification attempt for admin inspection."""

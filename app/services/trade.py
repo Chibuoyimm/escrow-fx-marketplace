@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
 from app.domain.entities import TradeContract, TradeContractDetails
@@ -14,6 +14,8 @@ from app.domain.enums import (
     TradeContractStatus,
 )
 from app.domain.exceptions import AuthorizationError, InvariantViolationError, NotFoundError
+from app.domain.lifecycle import offer_is_active, request_can_accept_offers
+from app.infrastructure.pagination import decode_cursor, encode_next_cursor, normalize_date_range
 from app.services._shared import UnitOfWorkFactory, as_utc, build_uow, utc_now
 from app.services.outbox import OutboxEventPublisher
 
@@ -39,19 +41,17 @@ class TradeService:
         current_time = utc_now()
 
         async with self._uow_factory() as uow:
-            offer = await uow.exchange_offers.get(offer_id)
-            exchange_request = await uow.exchange_requests.get(offer.request_id)
+            initial_offer = await uow.exchange_offers.get(offer_id)
+            exchange_request = await uow.exchange_requests.get_for_update(initial_offer.request_id)
+            offer = await uow.exchange_offers.get_for_update(offer_id)
 
             if exchange_request.creator_user_id != requester_user_id:
                 raise AuthorizationError("Only the request creator can accept an offer.")
-            if exchange_request.status not in {
-                ExchangeRequestStatus.REQUEST_OPEN,
-                ExchangeRequestStatus.OFFER_PENDING,
-            }:
+            if not request_can_accept_offers(exchange_request.status):
                 raise InvariantViolationError("This exchange request can no longer accept offers.")
             if as_utc(exchange_request.expires_at) <= current_time:
                 raise InvariantViolationError("This exchange request has expired.")
-            if offer.status is not ExchangeOfferStatus.ACTIVE:
+            if not offer_is_active(offer.status):
                 raise InvariantViolationError("This offer is no longer active.")
             if as_utc(offer.expires_at) <= current_time:
                 raise InvariantViolationError("This offer has expired.")
@@ -152,13 +152,28 @@ class TradeService:
         async with self._uow_factory() as uow:
             return await uow.trade_contracts.get_for_participant(trade_id, participant_user_id)
 
-    async def list_trades_for_participant(
+    async def list_trades_for_participant_page(
         self,
         participant_user_id: UUID,
-    ) -> list[TradeContractDetails]:
-        """List trade contracts for one of their participants."""
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        statuses: tuple[TradeContractStatus, ...] | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[TradeContractDetails], str | None]:
+        """List participant trades using stable cursor pagination."""
+        created_from, created_to = normalize_date_range(created_from, created_to)
         async with self._uow_factory() as uow:
-            return await uow.trade_contracts.list_for_participant(participant_user_id)
+            items, next_position = await uow.trade_contracts.list_for_participant_page(
+                participant_user_id,
+                cursor=decode_cursor(cursor),
+                limit=limit,
+                statuses=statuses,
+                created_from=created_from,
+                created_to=created_to,
+            )
+            return items, encode_next_cursor(next_position)
 
 
 def get_trade_service() -> TradeService:

@@ -34,28 +34,25 @@ class MarketplaceExpiryService:
         current_time = utc_now()
 
         async with self._uow_factory() as uow:
-            requests_to_expire = await uow.exchange_requests.list_due_for_expiry(current_time)
-            expired_requests = await uow.exchange_requests.expire_due(current_time)
-
-            offers_to_expire = await uow.exchange_offers.list_due_for_expiry(current_time)
-            expired_offers = await uow.exchange_offers.expire_due(current_time)
-
-            requests_to_reopen = await uow.exchange_requests.list_pending_without_active_offers()
-            reopened_requests = await uow.exchange_requests.reopen_pending_without_active_offers(
-                current_time
+            expired_request_rows = await uow.exchange_requests.expire_due(current_time)
+            expired_offer_rows = await uow.exchange_offers.expire_due(current_time)
+            reopened_request_rows = (
+                await uow.exchange_requests.reopen_pending_without_active_offers(current_time)
             )
+            cancelled_trade_rows = await uow.trade_contracts.cancel_due_unfunded(current_time)
+            expired_requests = len(expired_request_rows)
+            expired_offers = len(expired_offer_rows)
+            reopened_requests = len(reopened_request_rows)
+            cancelled_trades = len(cancelled_trade_rows)
 
-            trades_to_cancel = await uow.trade_contracts.list_due_unfunded_details(current_time)
-            cancelled_trades = await uow.trade_contracts.cancel_due_unfunded(current_time)
-
-            for exchange_request in requests_to_expire:
+            for exchange_request in expired_request_rows:
                 await self._outbox.exchange_request_expired(
                     uow,
                     request_id=exchange_request.id,
                     creator_user_id=exchange_request.creator_user_id,
                 )
 
-            for offer in offers_to_expire:
+            for offer in expired_offer_rows:
                 await self._outbox.exchange_offer_expired(
                     uow,
                     offer_id=offer.id,
@@ -63,14 +60,14 @@ class MarketplaceExpiryService:
                     offer_user_id=offer.offer_user_id,
                 )
 
-            for exchange_request in requests_to_reopen:
+            for exchange_request in reopened_request_rows:
                 await self._outbox.exchange_request_reopened(
                     uow,
                     request_id=exchange_request.id,
                     creator_user_id=exchange_request.creator_user_id,
                 )
 
-            for trade in trades_to_cancel:
+            for trade in cancelled_trade_rows:
                 for recipient_user_id in (trade.requester_user_id, trade.counterparty_user_id):
                     await self._outbox.trade_contract_cancelled(
                         uow,
@@ -90,10 +87,10 @@ class MarketplaceExpiryService:
             await uow.commit()
 
         return MarketplaceExpiryResult(
-            expired_requests=expired_requests,
-            expired_offers=expired_offers,
-            reopened_requests=reopened_requests,
-            cancelled_trades=cancelled_trades,
+            expired_requests=len(expired_request_rows),
+            expired_offers=len(expired_offer_rows),
+            reopened_requests=len(reopened_request_rows),
+            cancelled_trades=len(cancelled_trade_rows),
         )
 
 

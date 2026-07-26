@@ -138,6 +138,38 @@ Reconcile pending provider KYC checks with:
 make reconcile-kyc
 ```
 
+Marketplace lifecycle endpoints include:
+
+```bash
+PATCH /api/v1/exchange-requests/{request_id}
+POST /api/v1/exchange-requests/{request_id}/relist
+PATCH /api/v1/offers/{offer_id}
+GET /api/v1/offers/mine
+GET /api/v1/offers/{offer_id}
+```
+
+Requests can be edited only while `request_open` and before any historical offer
+exists. Offers can change their rate only while active and before the parent
+request is locked. Relisting creates a new open request and never resurrects or
+mutates the original terminal request. The new request exposes
+`relisted_from_request_id`; a terminal request can have only one direct
+successor, while a later terminal successor may itself be relisted.
+
+Marketplace and admin list endpoints return cursor-paginated responses with
+`items` and `next_cursor`. Use `limit`, `cursor`, and the endpoint-specific
+status/currency/amount/rate filters. Marketplace, participant, and admin
+request/offer/trade pages also accept inclusive `created_from` and
+`created_to` filters. Naive or timezone-aware date values are normalized to
+UTC before comparison. Ordering is newest first by `created_at`, then by ID for
+stable pagination; malformed cursors and reversed ranges return the standard
+domain validation error. This is an intentional v1 breaking contract change:
+because no frontend/client exists yet, list arrays were changed to
+`{items, next_cursor}` rather than adding duplicate paginated endpoints.
+
+Offer history reads include the parent request's status, currency pair, source
+amount, preferred rate, and expiry. They remain available to either the offer
+owner or request creator after the marketplace request becomes terminal.
+
 Seed reference currencies and corridors with:
 
 ```bash
@@ -179,6 +211,8 @@ APP_KNOCK_BRANCH=""
 
 Outbox event types are mapped to hyphenated Knock workflow keys. For example,
 `exchange_request.created` triggers `exchange-request-created`, and
+`exchange_request.relisted` triggers `exchange-request-relisted`,
+`exchange_offer.updated` triggers `exchange-offer-updated`, and
 `trade_contract.locked` triggers `trade-contract-locked`.
 
 The dispatcher marks events as delivered on success and schedules failed events

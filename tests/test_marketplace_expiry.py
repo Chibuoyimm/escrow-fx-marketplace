@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.domain.enums import (
@@ -13,7 +15,8 @@ from app.domain.enums import (
     TradeContractStatus,
 )
 from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
-from app.services.marketplace_expiry import MarketplaceExpiryService
+from app.models.trade_contract import TradeContractModel
+from app.services.marketplace_expiry import MarketplaceExpiryResult, MarketplaceExpiryService
 from tests.conftest import (
     build_currency,
     build_exchange_offer,
@@ -195,3 +198,48 @@ async def test_marketplace_expiry_is_idempotent(
     assert result.expired_offers == 0
     assert result.reopened_requests == 0
     assert result.cancelled_trades == 0
+
+
+async def test_marketplace_expiry_does_not_publish_for_stale_candidates(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = await seed_expiry_scenario(session_factory)
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        request = await uow.exchange_requests.get(seeded["expired_request_id"])
+        await uow.exchange_requests.update(replace(request, status=ExchangeRequestStatus.CANCELLED))
+        pending = await uow.exchange_requests.get(seeded["pending_request_id"])
+        await uow.exchange_requests.update(
+            replace(pending, status=ExchangeRequestStatus.REQUEST_OPEN)
+        )
+        expired_offer = await uow.exchange_offers.get(seeded["expired_offer_id"])
+        await uow.exchange_offers.update(
+            replace(expired_offer, status=ExchangeOfferStatus.WITHDRAWN)
+        )
+        trade = await uow.trade_contracts.get(seeded["due_trade_id"])
+        assert uow.session is not None
+        await uow.session.execute(
+            update(TradeContractModel)
+            .where(TradeContractModel.id == trade.id)
+            .values(status=TradeContractStatus.CANCELLED)
+        )
+        await uow.commit()
+
+    service = MarketplaceExpiryService(uow_factory=lambda: SqlAlchemyUnitOfWork(session_factory))
+    result = await service.expire_due_items()
+
+    assert result == MarketplaceExpiryResult(0, 0, 0, 0)
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        for event_type in (
+            "exchange_request.expired",
+            "exchange_offer.expired",
+            "exchange_request.reopened",
+            "trade_contract.cancelled",
+        ):
+            assert await uow.outbox_events.list_admin(event_type=event_type) == []
+        summary = await uow.outbox_events.list_admin(event_type="marketplace_expiry.completed")
+        assert summary[-1].payload == {
+            "expired_requests": 0,
+            "expired_offers": 0,
+            "reopened_requests": 0,
+            "cancelled_trades": 0,
+        }

@@ -29,12 +29,26 @@ class CreateExchangeRequestRequest(BaseModel):
         return value
 
 
+class UpdateExchangeRequestRequest(BaseModel):
+    """Optional marketplace terms that may be changed before an offer exists."""
+
+    from_amount: Decimal | None = Field(default=None, gt=0)
+    preferred_rate: Decimal | None = Field(default=None, gt=0)
+    min_rate: Decimal | None = Field(default=None, gt=0)
+    model_config = ConfigDict(extra="forbid")
+
+
+class RelistExchangeRequestRequest(UpdateExchangeRequestRequest):
+    """Optional replacement terms for relisting an expired or cancelled request."""
+
+
 class ExchangeRequestResponse(BaseModel):
     """Exchange request response payload."""
 
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    relisted_from_request_id: UUID | None
     creator_user_id: UUID
     from_currency_code: str
     to_currency_code: str

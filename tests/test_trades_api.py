@@ -439,11 +439,13 @@ async def test_list_trades_returns_participant_trades_ordered_newest_first(
     requester_response = await client.get("/api/v1/trades", headers=requester_headers)
 
     assert requester_response.status_code == 200
-    assert [trade["id"] for trade in requester_response.json()] == [
+    assert [trade["id"] for trade in requester_response.json()["items"]] == [
         str(newer_trade.id),
         str(older_trade.id),
     ]
-    assert str(outsider_trade.id) not in {trade["id"] for trade in requester_response.json()}
+    assert str(outsider_trade.id) not in {
+        trade["id"] for trade in requester_response.json()["items"]
+    }
 
 
 async def test_list_trades_requires_authentication(client: AsyncClient) -> None:

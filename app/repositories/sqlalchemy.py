@@ -42,6 +42,7 @@ from app.domain.enums import (
 )
 from app.domain.exceptions import ConflictError, NotFoundError
 from app.infrastructure.exceptions import InfrastructureError
+from app.infrastructure.pagination import Cursor
 from app.models.corridor import CorridorModel, CorridorRailModel
 from app.models.currency import CurrencyModel
 from app.models.email_verification_token import EmailVerificationTokenModel
@@ -85,6 +86,26 @@ class SqlAlchemyRepository:
             raise ConflictError(conflict_detail) from exc
         except Exception as exc:
             raise InfrastructureError(title="Database Error", detail=str(exc)) from exc
+
+    @staticmethod
+    def _before_cursor(created_at: Any, item_id: Any, cursor: Cursor | None) -> Any:
+        """Build the stable descending keyset predicate for a cursor."""
+        if cursor is None:
+            return None
+        return or_(
+            created_at < cursor.created_at,
+            and_(created_at == cursor.created_at, item_id < cursor.item_id),
+        )
+
+    @staticmethod
+    def _page_cursor(models: Any, limit: int) -> tuple[list[Any], Cursor | None]:
+        """Trim one look-ahead row and return the next position."""
+        has_next = len(models) > limit
+        page = list(models[:limit])
+        if not has_next or not page:
+            return page, None
+        last = page[-1]
+        return page, Cursor(last.created_at, last.id)
 
 
 class SqlAlchemyUserRepository(SqlAlchemyRepository, UserRepositoryProtocol):
@@ -150,6 +171,27 @@ class SqlAlchemyUserRepository(SqlAlchemyRepository, UserRepositoryProtocol):
             statement = statement.where(UserModel.status == status)
         result = await self.session.execute(statement)
         return [model.to_domain() for model in result.scalars().all()]
+
+    async def list_page(
+        self,
+        *,
+        status: UserStatus | None = None,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+    ) -> tuple[list[User], Cursor | None]:
+        statement: Select[tuple[UserModel]] = (
+            select(UserModel)
+            .order_by(UserModel.created_at.desc(), UserModel.id.desc())
+            .limit(limit + 1)
+        )
+        if status is not None:
+            statement = statement.where(UserModel.status == status)
+        cursor_clause = self._before_cursor(UserModel.created_at, UserModel.id, cursor)
+        if cursor_clause is not None:
+            statement = statement.where(cursor_clause)
+        result = await self.session.execute(statement)
+        models, next_cursor = self._page_cursor(result.scalars().all(), limit)
+        return [model.to_domain() for model in models], next_cursor
 
 
 class SqlAlchemyEmailVerificationTokenRepository(
@@ -346,6 +388,29 @@ class SqlAlchemyKycVerificationRepository(
         result = await self.session.execute(statement)
         return [model.to_domain() for model in result.scalars().all()]
 
+    async def list_admin_page(
+        self,
+        *,
+        status: KycVerificationStatus | None = None,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+    ) -> tuple[list[KycVerification], Cursor | None]:
+        statement: Select[tuple[KycVerificationModel]] = (
+            select(KycVerificationModel)
+            .order_by(KycVerificationModel.created_at.desc(), KycVerificationModel.id.desc())
+            .limit(limit + 1)
+        )
+        if status is not None:
+            statement = statement.where(KycVerificationModel.status == status)
+        cursor_clause = self._before_cursor(
+            KycVerificationModel.created_at, KycVerificationModel.id, cursor
+        )
+        if cursor_clause is not None:
+            statement = statement.where(cursor_clause)
+        result = await self.session.execute(statement)
+        models, next_cursor = self._page_cursor(result.scalars().all(), limit)
+        return [model.to_domain() for model in models], next_cursor
+
     async def update(self, verification: KycVerification) -> KycVerification:
         model = await self.session.get(KycVerificationModel, verification.id)
         if model is None:
@@ -396,6 +461,12 @@ class SqlAlchemyCurrencyRepository(SqlAlchemyRepository, CurrencyRepositoryProto
         model = result.scalar_one_or_none()
         if model is None:
             raise NotFoundError(f"Currency '{code}' was not found.")
+        return model.to_domain()
+
+    async def get(self, currency_id: UUID) -> Currency:
+        model = await self.session.get(CurrencyModel, currency_id)
+        if model is None:
+            raise NotFoundError(f"Currency '{currency_id}' was not found.")
         return model.to_domain()
 
     async def list_active(self) -> list[Currency]:
@@ -573,6 +644,7 @@ class SqlAlchemyExchangeRequestRepository(SqlAlchemyRepository, ExchangeRequestR
     async def add(self, exchange_request: ExchangeRequest) -> ExchangeRequest:
         model = ExchangeRequestModel(
             id=exchange_request.id,
+            relisted_from_request_id=exchange_request.relisted_from_request_id,
             creator_user_id=exchange_request.creator_user_id,
             from_currency_id=exchange_request.from_currency_id,
             to_currency_id=exchange_request.to_currency_id,
@@ -594,6 +666,10 @@ class SqlAlchemyExchangeRequestRepository(SqlAlchemyRepository, ExchangeRequestR
             raise NotFoundError(f"Exchange request '{exchange_request.id}' was not found.")
 
         model.status = exchange_request.status
+        model.relisted_from_request_id = exchange_request.relisted_from_request_id
+        model.from_amount = exchange_request.from_amount
+        model.preferred_rate = exchange_request.preferred_rate
+        model.min_rate = exchange_request.min_rate
         model.expires_at = exchange_request.expires_at
         model.updated_at = exchange_request.updated_at
 
@@ -602,6 +678,19 @@ class SqlAlchemyExchangeRequestRepository(SqlAlchemyRepository, ExchangeRequestR
 
     async def get(self, request_id: UUID) -> ExchangeRequest:
         model = await self.session.get(ExchangeRequestModel, request_id)
+        if model is None:
+            raise NotFoundError(f"Exchange request '{request_id}' was not found.")
+        return model.to_domain()
+
+    async def get_for_update(self, request_id: UUID) -> ExchangeRequest:
+        statement: Select[tuple[ExchangeRequestModel]] = (
+            select(ExchangeRequestModel)
+            .where(ExchangeRequestModel.id == request_id)
+            .execution_options(populate_existing=True)
+            .with_for_update()
+        )
+        result = await self.session.execute(statement)
+        model = result.scalar_one_or_none()
         if model is None:
             raise NotFoundError(f"Exchange request '{request_id}' was not found.")
         return model.to_domain()
@@ -681,29 +770,37 @@ class SqlAlchemyExchangeRequestRepository(SqlAlchemyRepository, ExchangeRequestR
             raise NotFoundError(f"Exchange request '{request_id}' was not found.")
         return model.to_details()
 
-    async def list_admin_details(
+    async def list_admin_details_page(
         self,
-        status: ExchangeRequestStatus | None = None,
-    ) -> list[ExchangeRequestDetails]:
+        *,
+        statuses: tuple[ExchangeRequestStatus, ...] | None = None,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[ExchangeRequestDetails], Cursor | None]:
         statement: Select[tuple[ExchangeRequestModel]] = (
             select(ExchangeRequestModel)
             .options(*self._details_load_options())
-            .order_by(ExchangeRequestModel.created_at.desc())
+            .order_by(ExchangeRequestModel.created_at.desc(), ExchangeRequestModel.id.desc())
+            .limit(limit + 1)
         )
-        if status is not None:
-            statement = statement.where(ExchangeRequestModel.status == status)
-        result = await self.session.execute(statement)
-        return [model.to_details() for model in result.unique().scalars().all()]
-
-    async def list_due_for_expiry(self, now: datetime) -> list[ExchangeRequest]:
-        statement: Select[tuple[ExchangeRequestModel]] = select(ExchangeRequestModel).where(
-            ExchangeRequestModel.status.in_(self._board_visible_statuses()),
-            ExchangeRequestModel.expires_at <= now,
+        if statuses:
+            statement = statement.where(ExchangeRequestModel.status.in_(statuses))
+        if created_from is not None:
+            statement = statement.where(ExchangeRequestModel.created_at >= created_from)
+        if created_to is not None:
+            statement = statement.where(ExchangeRequestModel.created_at <= created_to)
+        cursor_clause = self._before_cursor(
+            ExchangeRequestModel.created_at, ExchangeRequestModel.id, cursor
         )
+        if cursor_clause is not None:
+            statement = statement.where(cursor_clause)
         result = await self.session.execute(statement)
-        return [model.to_domain() for model in result.scalars().all()]
+        models, next_cursor = self._page_cursor(result.unique().scalars().all(), limit)
+        return [model.to_details() for model in models], next_cursor
 
-    async def expire_due(self, now: datetime) -> int:
+    async def expire_due(self, now: datetime) -> list[ExchangeRequest]:
         result = await self.session.execute(
             update(ExchangeRequestModel)
             .where(
@@ -711,20 +808,11 @@ class SqlAlchemyExchangeRequestRepository(SqlAlchemyRepository, ExchangeRequestR
                 ExchangeRequestModel.expires_at <= now,
             )
             .values(status=ExchangeRequestStatus.EXPIRED, updated_at=now)
+            .returning(ExchangeRequestModel)
         )
-        return self._rowcount(result)
-
-    async def list_pending_without_active_offers(self) -> list[ExchangeRequest]:
-        statement: Select[tuple[ExchangeRequestModel]] = select(ExchangeRequestModel).where(
-            ExchangeRequestModel.status == ExchangeRequestStatus.OFFER_PENDING,
-            ~ExchangeRequestModel.offers.any(
-                ExchangeOfferModel.status == ExchangeOfferStatus.ACTIVE
-            ),
-        )
-        result = await self.session.execute(statement)
         return [model.to_domain() for model in result.scalars().all()]
 
-    async def reopen_pending_without_active_offers(self, now: datetime) -> int:
+    async def reopen_pending_without_active_offers(self, now: datetime) -> list[ExchangeRequest]:
         result = await self.session.execute(
             update(ExchangeRequestModel)
             .where(
@@ -734,12 +822,135 @@ class SqlAlchemyExchangeRequestRepository(SqlAlchemyRepository, ExchangeRequestR
                 ),
             )
             .values(status=ExchangeRequestStatus.REQUEST_OPEN, updated_at=now)
+            .returning(ExchangeRequestModel)
         )
-        return self._rowcount(result)
+        return [model.to_domain() for model in result.scalars().all()]
+
+    async def has_any_offers(self, request_id: UUID) -> bool:
+        statement: Select[tuple[UUID]] = (
+            select(ExchangeOfferModel.id)
+            .where(ExchangeOfferModel.request_id == request_id)
+            .limit(1)
+        )
+        result = await self.session.execute(statement)
+        return result.scalar_one_or_none() is not None
+
+    async def has_relisted_successor(self, request_id: UUID) -> bool:
+        statement: Select[tuple[UUID]] = (
+            select(ExchangeRequestModel.id)
+            .where(ExchangeRequestModel.relisted_from_request_id == request_id)
+            .limit(1)
+        )
+        result = await self.session.execute(statement)
+        return result.scalar_one_or_none() is not None
+
+    async def list_board_details_page(
+        self,
+        viewer_user_id: UUID,
+        *,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+        statuses: tuple[ExchangeRequestStatus, ...] | None = None,
+        from_currency_code: str | None = None,
+        to_currency_code: str | None = None,
+        min_amount: Decimal | None = None,
+        max_amount: Decimal | None = None,
+        min_preferred_rate: Decimal | None = None,
+        max_preferred_rate: Decimal | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[ExchangeRequestDetails], Cursor | None]:
+        visible_statuses = tuple(
+            status
+            for status in (statuses or tuple(self._board_visible_statuses()))
+            if status in self._board_visible_statuses()
+        )
+        statement: Select[tuple[ExchangeRequestModel]] = (
+            select(ExchangeRequestModel)
+            .options(*self._details_load_options())
+            .where(
+                ExchangeRequestModel.creator_user_id != viewer_user_id,
+                ExchangeRequestModel.status.in_(visible_statuses),
+                ExchangeRequestModel.expires_at > self._utc_now(),
+                ExchangeRequestModel.from_currency.has(
+                    CurrencyModel.status == CurrencyStatus.ACTIVE
+                ),
+                ExchangeRequestModel.to_currency.has(CurrencyModel.status == CurrencyStatus.ACTIVE),
+            )
+            .order_by(ExchangeRequestModel.created_at.desc(), ExchangeRequestModel.id.desc())
+            .limit(limit + 1)
+        )
+        if from_currency_code is not None:
+            statement = statement.where(
+                ExchangeRequestModel.from_currency.has(CurrencyModel.code == from_currency_code)
+            )
+        if to_currency_code is not None:
+            statement = statement.where(
+                ExchangeRequestModel.to_currency.has(CurrencyModel.code == to_currency_code)
+            )
+        if min_amount is not None:
+            statement = statement.where(ExchangeRequestModel.from_amount >= min_amount)
+        if max_amount is not None:
+            statement = statement.where(ExchangeRequestModel.from_amount <= max_amount)
+        if min_preferred_rate is not None:
+            statement = statement.where(ExchangeRequestModel.preferred_rate >= min_preferred_rate)
+        if max_preferred_rate is not None:
+            statement = statement.where(ExchangeRequestModel.preferred_rate <= max_preferred_rate)
+        if created_from is not None:
+            statement = statement.where(ExchangeRequestModel.created_at >= created_from)
+        if created_to is not None:
+            statement = statement.where(ExchangeRequestModel.created_at <= created_to)
+        cursor_clause = self._before_cursor(
+            ExchangeRequestModel.created_at, ExchangeRequestModel.id, cursor
+        )
+        if cursor_clause is not None:
+            statement = statement.where(cursor_clause)
+        result = await self.session.execute(statement)
+        models, next_cursor = self._page_cursor(result.unique().scalars().all(), limit)
+        return [model.to_details() for model in models], next_cursor
+
+    async def list_details_for_user_page(
+        self,
+        user_id: UUID,
+        *,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+        statuses: tuple[ExchangeRequestStatus, ...] | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[ExchangeRequestDetails], Cursor | None]:
+        statement: Select[tuple[ExchangeRequestModel]] = (
+            select(ExchangeRequestModel)
+            .options(*self._details_load_options())
+            .where(ExchangeRequestModel.creator_user_id == user_id)
+            .order_by(ExchangeRequestModel.created_at.desc(), ExchangeRequestModel.id.desc())
+            .limit(limit + 1)
+        )
+        if statuses:
+            statement = statement.where(ExchangeRequestModel.status.in_(statuses))
+        if created_from is not None:
+            statement = statement.where(ExchangeRequestModel.created_at >= created_from)
+        if created_to is not None:
+            statement = statement.where(ExchangeRequestModel.created_at <= created_to)
+        cursor_clause = self._before_cursor(
+            ExchangeRequestModel.created_at, ExchangeRequestModel.id, cursor
+        )
+        if cursor_clause is not None:
+            statement = statement.where(cursor_clause)
+        result = await self.session.execute(statement)
+        models, next_cursor = self._page_cursor(result.unique().scalars().all(), limit)
+        return [model.to_details() for model in models], next_cursor
 
 
 class SqlAlchemyExchangeOfferRepository(SqlAlchemyRepository, ExchangeOfferRepositoryProtocol):
     """Exchange offer repository implementation."""
+
+    @staticmethod
+    def _details_load_options() -> tuple[Any, ...]:
+        return (
+            joinedload(ExchangeOfferModel.request).joinedload(ExchangeRequestModel.from_currency),
+            joinedload(ExchangeOfferModel.request).joinedload(ExchangeRequestModel.to_currency),
+        )
 
     async def add(self, exchange_offer: ExchangeOffer) -> ExchangeOffer:
         model = ExchangeOfferModel(
@@ -762,6 +973,7 @@ class SqlAlchemyExchangeOfferRepository(SqlAlchemyRepository, ExchangeOfferRepos
             raise NotFoundError(f"Exchange offer '{exchange_offer.id}' was not found.")
 
         model.status = exchange_offer.status
+        model.offered_rate = exchange_offer.offered_rate
         model.expires_at = exchange_offer.expires_at
         model.updated_at = exchange_offer.updated_at
 
@@ -770,6 +982,19 @@ class SqlAlchemyExchangeOfferRepository(SqlAlchemyRepository, ExchangeOfferRepos
 
     async def get(self, offer_id: UUID) -> ExchangeOffer:
         model = await self.session.get(ExchangeOfferModel, offer_id)
+        if model is None:
+            raise NotFoundError(f"Exchange offer '{offer_id}' was not found.")
+        return model.to_domain()
+
+    async def get_for_update(self, offer_id: UUID) -> ExchangeOffer:
+        statement: Select[tuple[ExchangeOfferModel]] = (
+            select(ExchangeOfferModel)
+            .where(ExchangeOfferModel.id == offer_id)
+            .execution_options(populate_existing=True)
+            .with_for_update()
+        )
+        result = await self.session.execute(statement)
+        model = result.scalar_one_or_none()
         if model is None:
             raise NotFoundError(f"Exchange offer '{offer_id}' was not found.")
         return model.to_domain()
@@ -786,11 +1011,101 @@ class SqlAlchemyExchangeOfferRepository(SqlAlchemyRepository, ExchangeOfferRepos
     async def list_details_for_request(self, request_id: UUID) -> list[ExchangeOfferDetails]:
         statement: Select[tuple[ExchangeOfferModel]] = (
             select(ExchangeOfferModel)
+            .options(*self._details_load_options())
             .where(ExchangeOfferModel.request_id == request_id)
             .order_by(ExchangeOfferModel.created_at.desc())
         )
         result = await self.session.execute(statement)
         return [model.to_details() for model in result.scalars().all()]
+
+    async def get_visible_details(
+        self, offer_id: UUID, viewer_user_id: UUID
+    ) -> ExchangeOfferDetails:
+        statement: Select[tuple[ExchangeOfferModel]] = (
+            select(ExchangeOfferModel)
+            .options(*self._details_load_options())
+            .where(
+                ExchangeOfferModel.id == offer_id,
+                or_(
+                    ExchangeOfferModel.offer_user_id == viewer_user_id,
+                    ExchangeOfferModel.request.has(
+                        ExchangeRequestModel.creator_user_id == viewer_user_id
+                    ),
+                ),
+            )
+        )
+        result = await self.session.execute(statement)
+        model = result.scalar_one_or_none()
+        if model is None:
+            raise NotFoundError(f"Exchange offer '{offer_id}' was not found.")
+        return model.to_details()
+
+    async def list_details_for_request_page(
+        self,
+        request_id: UUID,
+        *,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[ExchangeOfferDetails], Cursor | None]:
+        statement: Select[tuple[ExchangeOfferModel]] = (
+            select(ExchangeOfferModel)
+            .options(*self._details_load_options())
+            .where(ExchangeOfferModel.request_id == request_id)
+            .order_by(ExchangeOfferModel.created_at.desc(), ExchangeOfferModel.id.desc())
+            .limit(limit + 1)
+        )
+        if created_from is not None:
+            statement = statement.where(ExchangeOfferModel.created_at >= created_from)
+        if created_to is not None:
+            statement = statement.where(ExchangeOfferModel.created_at <= created_to)
+        cursor_clause = self._before_cursor(
+            ExchangeOfferModel.created_at, ExchangeOfferModel.id, cursor
+        )
+        if cursor_clause is not None:
+            statement = statement.where(cursor_clause)
+        result = await self.session.execute(statement)
+        models, next_cursor = self._page_cursor(result.scalars().all(), limit)
+        return [model.to_details() for model in models], next_cursor
+
+    async def list_details_for_user_page(
+        self,
+        user_id: UUID,
+        *,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+        statuses: tuple[ExchangeOfferStatus, ...] | None = None,
+        min_offered_rate: Decimal | None = None,
+        max_offered_rate: Decimal | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[ExchangeOfferDetails], Cursor | None]:
+        statement: Select[tuple[ExchangeOfferModel]] = (
+            select(ExchangeOfferModel)
+            .options(*self._details_load_options())
+            .where(ExchangeOfferModel.offer_user_id == user_id)
+            .order_by(ExchangeOfferModel.created_at.desc(), ExchangeOfferModel.id.desc())
+            .limit(limit + 1)
+        )
+        if statuses:
+            statement = statement.where(ExchangeOfferModel.status.in_(statuses))
+        if min_offered_rate is not None:
+            statement = statement.where(ExchangeOfferModel.offered_rate >= min_offered_rate)
+        if max_offered_rate is not None:
+            statement = statement.where(ExchangeOfferModel.offered_rate <= max_offered_rate)
+        if created_from is not None:
+            statement = statement.where(ExchangeOfferModel.created_at >= created_from)
+        if created_to is not None:
+            statement = statement.where(ExchangeOfferModel.created_at <= created_to)
+        cursor_clause = self._before_cursor(
+            ExchangeOfferModel.created_at, ExchangeOfferModel.id, cursor
+        )
+        if cursor_clause is not None:
+            statement = statement.where(cursor_clause)
+        result = await self.session.execute(statement)
+        models, next_cursor = self._page_cursor(result.scalars().all(), limit)
+        return [model.to_details() for model in models], next_cursor
 
     async def has_active_offer_for_request(self, request_id: UUID, user_id: UUID) -> bool:
         statement: Select[tuple[ExchangeOfferModel]] = select(ExchangeOfferModel).where(
@@ -802,32 +1117,37 @@ class SqlAlchemyExchangeOfferRepository(SqlAlchemyRepository, ExchangeOfferRepos
         result = await self.session.execute(statement)
         return result.scalar_one_or_none() is not None
 
-    async def list_admin_details(
+    async def list_admin_details_page(
         self,
-        status: ExchangeOfferStatus | None = None,
-    ) -> list[ExchangeOfferDetails]:
-        statement: Select[tuple[ExchangeOfferModel]] = select(ExchangeOfferModel).order_by(
-            ExchangeOfferModel.created_at.desc()
+        *,
+        statuses: tuple[ExchangeOfferStatus, ...] | None = None,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[ExchangeOfferDetails], Cursor | None]:
+        statement: Select[tuple[ExchangeOfferModel]] = (
+            select(ExchangeOfferModel)
+            .options(*self._details_load_options())
+            .order_by(ExchangeOfferModel.created_at.desc(), ExchangeOfferModel.id.desc())
+            .limit(limit + 1)
         )
-        if status is not None:
-            statement = statement.where(ExchangeOfferModel.status == status)
-        result = await self.session.execute(statement)
-        return [model.to_details() for model in result.scalars().all()]
-
-    async def list_due_for_expiry(self, now: datetime) -> list[ExchangeOffer]:
-        statement: Select[tuple[ExchangeOfferModel]] = select(ExchangeOfferModel).where(
-            ExchangeOfferModel.status == ExchangeOfferStatus.ACTIVE,
-            or_(
-                ExchangeOfferModel.expires_at <= now,
-                ExchangeOfferModel.request.has(
-                    ExchangeRequestModel.status == ExchangeRequestStatus.EXPIRED
-                ),
-            ),
+        if statuses:
+            statement = statement.where(ExchangeOfferModel.status.in_(statuses))
+        if created_from is not None:
+            statement = statement.where(ExchangeOfferModel.created_at >= created_from)
+        if created_to is not None:
+            statement = statement.where(ExchangeOfferModel.created_at <= created_to)
+        cursor_clause = self._before_cursor(
+            ExchangeOfferModel.created_at, ExchangeOfferModel.id, cursor
         )
+        if cursor_clause is not None:
+            statement = statement.where(cursor_clause)
         result = await self.session.execute(statement)
-        return [model.to_domain() for model in result.scalars().all()]
+        models, next_cursor = self._page_cursor(result.scalars().all(), limit)
+        return [model.to_details() for model in models], next_cursor
 
-    async def expire_due(self, now: datetime) -> int:
+    async def expire_due(self, now: datetime) -> list[ExchangeOffer]:
         result = await self.session.execute(
             update(ExchangeOfferModel)
             .where(
@@ -840,8 +1160,9 @@ class SqlAlchemyExchangeOfferRepository(SqlAlchemyRepository, ExchangeOfferRepos
                 ),
             )
             .values(status=ExchangeOfferStatus.EXPIRED, updated_at=now)
+            .returning(ExchangeOfferModel)
         )
-        return self._rowcount(result)
+        return [model.to_domain() for model in result.scalars().all()]
 
 
 class SqlAlchemyTradeContractRepository(SqlAlchemyRepository, TradeContractRepositoryProtocol):
@@ -899,7 +1220,16 @@ class SqlAlchemyTradeContractRepository(SqlAlchemyRepository, TradeContractRepos
             raise NotFoundError(f"Trade '{trade_id}' was not found.")
         return model.to_details()
 
-    async def list_for_participant(self, user_id: UUID) -> list[TradeContractDetails]:
+    async def list_for_participant_page(
+        self,
+        user_id: UUID,
+        *,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+        statuses: tuple[TradeContractStatus, ...] | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[TradeContractDetails], Cursor | None]:
         statement: Select[tuple[TradeContractModel]] = (
             select(TradeContractModel)
             .options(*self._details_load_options())
@@ -909,40 +1239,57 @@ class SqlAlchemyTradeContractRepository(SqlAlchemyRepository, TradeContractRepos
                     TradeContractModel.accepted_offer.has(
                         ExchangeOfferModel.offer_user_id == user_id
                     ),
-                ),
+                )
             )
-            .order_by(TradeContractModel.created_at.desc())
+            .order_by(TradeContractModel.created_at.desc(), TradeContractModel.id.desc())
+            .limit(limit + 1)
         )
+        if statuses:
+            statement = statement.where(TradeContractModel.status.in_(statuses))
+        if created_from is not None:
+            statement = statement.where(TradeContractModel.created_at >= created_from)
+        if created_to is not None:
+            statement = statement.where(TradeContractModel.created_at <= created_to)
+        cursor_clause = self._before_cursor(
+            TradeContractModel.created_at, TradeContractModel.id, cursor
+        )
+        if cursor_clause is not None:
+            statement = statement.where(cursor_clause)
         result = await self.session.execute(statement)
-        return [model.to_details() for model in result.unique().scalars().all()]
+        models, next_cursor = self._page_cursor(result.unique().scalars().all(), limit)
+        return [model.to_details() for model in models], next_cursor
 
-    async def list_admin_details(
+    async def list_admin_details_page(
         self,
-        status: TradeContractStatus | None = None,
-    ) -> list[TradeContractDetails]:
+        *,
+        statuses: tuple[TradeContractStatus, ...] | None = None,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[TradeContractDetails], Cursor | None]:
         statement: Select[tuple[TradeContractModel]] = (
             select(TradeContractModel)
             .options(*self._details_load_options())
-            .order_by(TradeContractModel.created_at.desc())
+            .order_by(TradeContractModel.created_at.desc(), TradeContractModel.id.desc())
+            .limit(limit + 1)
         )
-        if status is not None:
-            statement = statement.where(TradeContractModel.status == status)
-        result = await self.session.execute(statement)
-        return [model.to_details() for model in result.unique().scalars().all()]
-
-    async def list_due_unfunded_details(self, now: datetime) -> list[TradeContractDetails]:
-        statement: Select[tuple[TradeContractModel]] = (
-            select(TradeContractModel)
-            .options(*self._details_load_options())
-            .where(
-                TradeContractModel.status == TradeContractStatus.TERMS_LOCKED,
-                TradeContractModel.funding_deadline_at <= now,
-            )
+        if statuses:
+            statement = statement.where(TradeContractModel.status.in_(statuses))
+        if created_from is not None:
+            statement = statement.where(TradeContractModel.created_at >= created_from)
+        if created_to is not None:
+            statement = statement.where(TradeContractModel.created_at <= created_to)
+        cursor_clause = self._before_cursor(
+            TradeContractModel.created_at, TradeContractModel.id, cursor
         )
+        if cursor_clause is not None:
+            statement = statement.where(cursor_clause)
         result = await self.session.execute(statement)
-        return [model.to_details() for model in result.unique().scalars().all()]
+        models, next_cursor = self._page_cursor(result.unique().scalars().all(), limit)
+        return [model.to_details() for model in models], next_cursor
 
-    async def cancel_due_unfunded(self, now: datetime) -> int:
+    async def cancel_due_unfunded(self, now: datetime) -> list[TradeContractDetails]:
         result = await self.session.execute(
             update(TradeContractModel)
             .where(
@@ -950,8 +1297,17 @@ class SqlAlchemyTradeContractRepository(SqlAlchemyRepository, TradeContractRepos
                 TradeContractModel.funding_deadline_at <= now,
             )
             .values(status=TradeContractStatus.CANCELLED, updated_at=now)
+            .returning(TradeContractModel.id)
         )
-        return self._rowcount(result)
+        trade_ids = result.scalars().all()
+        if not trade_ids:
+            return []
+        details_result = await self.session.execute(
+            select(TradeContractModel)
+            .options(*self._details_load_options())
+            .where(TradeContractModel.id.in_(trade_ids))
+        )
+        return [model.to_details() for model in details_result.unique().scalars().all()]
 
 
 class SqlAlchemyOutboxEventRepository(SqlAlchemyRepository, OutboxEventRepositoryProtocol):
@@ -990,6 +1346,32 @@ class SqlAlchemyOutboxEventRepository(SqlAlchemyRepository, OutboxEventRepositor
             statement = statement.where(OutboxEventModel.event_type == event_type)
         result = await self.session.execute(statement)
         return [model.to_domain() for model in result.scalars().all()]
+
+    async def list_admin_page(
+        self,
+        *,
+        status: OutboxEventStatus | None = None,
+        event_type: str | None = None,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+    ) -> tuple[list[OutboxEvent], Cursor | None]:
+        statement: Select[tuple[OutboxEventModel]] = (
+            select(OutboxEventModel)
+            .order_by(OutboxEventModel.created_at.desc(), OutboxEventModel.id.desc())
+            .limit(limit + 1)
+        )
+        if status is not None:
+            statement = statement.where(OutboxEventModel.status == status)
+        if event_type is not None:
+            statement = statement.where(OutboxEventModel.event_type == event_type)
+        cursor_clause = self._before_cursor(
+            OutboxEventModel.created_at, OutboxEventModel.id, cursor
+        )
+        if cursor_clause is not None:
+            statement = statement.where(cursor_clause)
+        result = await self.session.execute(statement)
+        models, next_cursor = self._page_cursor(result.scalars().all(), limit)
+        return [model.to_domain() for model in models], next_cursor
 
     async def claim_due_for_dispatch(
         self,

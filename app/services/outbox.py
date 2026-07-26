@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
 from app.domain.entities import OutboxEvent
 from app.domain.enums import OutboxEventStatus
 from app.infrastructure.database.unit_of_work import AbstractUnitOfWork
-from app.services._shared import utc_now
+from app.services._shared import as_utc, format_display_datetime, utc_now
 
 SYSTEM_AGGREGATE_ID = UUID("00000000-0000-0000-0000-000000000000")
 
@@ -330,6 +331,41 @@ class OutboxEventPublisher:
             payload={"request_id": str(request_id)},
         )
 
+    async def exchange_request_relisted(
+        self,
+        uow: AbstractUnitOfWork,
+        *,
+        request_id: UUID,
+        original_request_id: UUID,
+        creator_user_id: UUID,
+        from_currency_code: str,
+        to_currency_code: str,
+        from_amount: str,
+        preferred_rate: str,
+        min_rate: str | None,
+        expires_at: datetime,
+    ) -> OutboxEvent:
+        """Publish creation of a fresh request from an old terminal request."""
+        return await self._add(
+            uow,
+            event_type="exchange_request.relisted",
+            aggregate_type="exchange_request",
+            aggregate_id=request_id,
+            recipient_user_id=creator_user_id,
+            payload={
+                "request_id": str(request_id),
+                "original_request_id": str(original_request_id),
+                "creator_user_id": str(creator_user_id),
+                "from_currency_code": from_currency_code,
+                "to_currency_code": to_currency_code,
+                "from_amount": from_amount,
+                "preferred_rate": preferred_rate,
+                "min_rate": min_rate,
+                "expires_at": as_utc(expires_at).isoformat(),
+                "expires_at_display": format_display_datetime(expires_at),
+            },
+        )
+
     async def exchange_offer_created(
         self,
         uow: AbstractUnitOfWork,
@@ -343,6 +379,31 @@ class OutboxEventPublisher:
         return await self._add(
             uow,
             event_type="exchange_offer.created",
+            aggregate_type="exchange_offer",
+            aggregate_id=offer_id,
+            recipient_user_id=recipient_user_id,
+            payload={
+                "offer_id": str(offer_id),
+                "request_id": str(request_id),
+                "offer_user_id": str(offer_user_id),
+                "offered_rate": offered_rate,
+            },
+        )
+
+    async def exchange_offer_updated(
+        self,
+        uow: AbstractUnitOfWork,
+        *,
+        offer_id: UUID,
+        request_id: UUID,
+        offer_user_id: UUID,
+        recipient_user_id: UUID,
+        offered_rate: str,
+    ) -> OutboxEvent:
+        """Publish a meaningful offer-term change to the request creator."""
+        return await self._add(
+            uow,
+            event_type="exchange_offer.updated",
             aggregate_type="exchange_offer",
             aggregate_id=offer_id,
             recipient_user_id=recipient_user_id,

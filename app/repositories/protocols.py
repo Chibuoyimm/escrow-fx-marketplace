@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
+from decimal import Decimal
 from uuid import UUID
 
 from app.domain.entities import (
@@ -31,6 +32,7 @@ from app.domain.enums import (
     TradeContractStatus,
     UserStatus,
 )
+from app.infrastructure.pagination import Cursor
 
 
 class UserRepositoryProtocol(ABC):
@@ -55,6 +57,16 @@ class UserRepositoryProtocol(ABC):
     @abstractmethod
     async def list_all(self, status: UserStatus | None = None) -> list[User]:
         """List users, optionally filtered by status."""
+
+    @abstractmethod
+    async def list_page(
+        self,
+        *,
+        status: UserStatus | None = None,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+    ) -> tuple[list[User], Cursor | None]:
+        """List users with cursor pagination."""
 
 
 class EmailVerificationTokenRepositoryProtocol(ABC):
@@ -138,6 +150,16 @@ class KycVerificationRepositoryProtocol(ABC):
         """List KYC verification attempts for admin inspection."""
 
     @abstractmethod
+    async def list_admin_page(
+        self,
+        *,
+        status: KycVerificationStatus | None = None,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+    ) -> tuple[list[KycVerification], Cursor | None]:
+        """List KYC verification attempts with cursor pagination."""
+
+    @abstractmethod
     async def update(self, verification: KycVerification) -> KycVerification:
         """Persist changes to an existing KYC verification attempt."""
 
@@ -152,6 +174,10 @@ class CurrencyRepositoryProtocol(ABC):
     @abstractmethod
     async def get_by_code(self, code: str) -> Currency:
         """Fetch a currency by code."""
+
+    @abstractmethod
+    async def get(self, currency_id: UUID) -> Currency:
+        """Fetch a currency by identifier."""
 
     @abstractmethod
     async def list_active(self) -> list[Currency]:
@@ -218,6 +244,10 @@ class ExchangeRequestRepositoryProtocol(ABC):
         """Fetch an exchange request by identifier."""
 
     @abstractmethod
+    async def get_for_update(self, request_id: UUID) -> ExchangeRequest:
+        """Fetch an exchange request with an explicit row lock."""
+
+    @abstractmethod
     async def get_details_for_user(self, request_id: UUID, user_id: UUID) -> ExchangeRequestDetails:
         """Fetch a user's exchange request read model by identifier."""
 
@@ -238,27 +268,65 @@ class ExchangeRequestRepositoryProtocol(ABC):
         """Fetch an exchange request read model visible to a viewer."""
 
     @abstractmethod
-    async def list_admin_details(
+    async def list_admin_details_page(
         self,
-        status: ExchangeRequestStatus | None = None,
-    ) -> list[ExchangeRequestDetails]:
-        """List exchange request read models for admin inspection."""
+        *,
+        statuses: tuple[ExchangeRequestStatus, ...] | None = None,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[ExchangeRequestDetails], Cursor | None]:
+        """List exchange requests for admins with cursor pagination."""
 
     @abstractmethod
-    async def list_due_for_expiry(self, now: datetime) -> list[ExchangeRequest]:
-        """List open or pending exchange requests whose deadline has passed."""
+    @abstractmethod
+    async def expire_due(self, now: datetime) -> list[ExchangeRequest]:
+        """Atomically expire due requests and return only changed rows."""
 
     @abstractmethod
-    async def expire_due(self, now: datetime) -> int:
-        """Expire open or pending exchange requests whose deadline has passed."""
+    async def reopen_pending_without_active_offers(self, now: datetime) -> list[ExchangeRequest]:
+        """Atomically reopen pending requests and return only changed rows."""
 
     @abstractmethod
-    async def list_pending_without_active_offers(self) -> list[ExchangeRequest]:
-        """List pending requests that no longer have active offers."""
+    async def has_any_offers(self, request_id: UUID) -> bool:
+        """Return whether any historical offer exists for a request."""
 
     @abstractmethod
-    async def reopen_pending_without_active_offers(self, now: datetime) -> int:
-        """Reopen pending requests that no longer have active offers."""
+    async def has_relisted_successor(self, request_id: UUID) -> bool:
+        """Return whether a request already has a direct relisted successor."""
+
+    @abstractmethod
+    async def list_board_details_page(
+        self,
+        viewer_user_id: UUID,
+        *,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+        statuses: tuple[ExchangeRequestStatus, ...] | None = None,
+        from_currency_code: str | None = None,
+        to_currency_code: str | None = None,
+        min_amount: Decimal | None = None,
+        max_amount: Decimal | None = None,
+        min_preferred_rate: Decimal | None = None,
+        max_preferred_rate: Decimal | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[ExchangeRequestDetails], Cursor | None]:
+        """List board requests with cursor pagination and filters."""
+
+    @abstractmethod
+    async def list_details_for_user_page(
+        self,
+        user_id: UUID,
+        *,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+        statuses: tuple[ExchangeRequestStatus, ...] | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[ExchangeRequestDetails], Cursor | None]:
+        """List a user's requests with cursor pagination and filters."""
 
 
 class ExchangeOfferRepositoryProtocol(ABC):
@@ -277,6 +345,10 @@ class ExchangeOfferRepositoryProtocol(ABC):
         """Fetch an exchange offer by identifier."""
 
     @abstractmethod
+    async def get_for_update(self, offer_id: UUID) -> ExchangeOffer:
+        """Fetch an exchange offer with an explicit row lock."""
+
+    @abstractmethod
     async def list_for_request(self, request_id: UUID) -> list[ExchangeOffer]:
         """List exchange offers for a request."""
 
@@ -289,19 +361,53 @@ class ExchangeOfferRepositoryProtocol(ABC):
         """Check whether a user already has an active offer on a request."""
 
     @abstractmethod
-    async def list_admin_details(
+    async def get_visible_details(
+        self, offer_id: UUID, viewer_user_id: UUID
+    ) -> ExchangeOfferDetails:
+        """Fetch an offer only for its owner or parent request creator."""
+
+    @abstractmethod
+    async def list_details_for_request_page(
         self,
-        status: ExchangeOfferStatus | None = None,
-    ) -> list[ExchangeOfferDetails]:
-        """List exchange offer read models for admin inspection."""
+        request_id: UUID,
+        *,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[ExchangeOfferDetails], Cursor | None]:
+        """List request offers with cursor pagination."""
 
     @abstractmethod
-    async def list_due_for_expiry(self, now: datetime) -> list[ExchangeOffer]:
-        """List active exchange offers whose deadline or parent request has expired."""
+    async def list_details_for_user_page(
+        self,
+        user_id: UUID,
+        *,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+        statuses: tuple[ExchangeOfferStatus, ...] | None = None,
+        min_offered_rate: Decimal | None = None,
+        max_offered_rate: Decimal | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[ExchangeOfferDetails], Cursor | None]:
+        """List a user's offers with cursor pagination and filters."""
 
     @abstractmethod
-    async def expire_due(self, now: datetime) -> int:
-        """Expire active exchange offers whose deadline or parent request has expired."""
+    async def list_admin_details_page(
+        self,
+        *,
+        statuses: tuple[ExchangeOfferStatus, ...] | None = None,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[ExchangeOfferDetails], Cursor | None]:
+        """List exchange offers for admins with cursor pagination."""
+
+    @abstractmethod
+    async def expire_due(self, now: datetime) -> list[ExchangeOffer]:
+        """Atomically expire due offers and return only changed rows."""
 
 
 class TradeContractRepositoryProtocol(ABC):
@@ -320,23 +426,33 @@ class TradeContractRepositoryProtocol(ABC):
         """Fetch a trade contract visible to a participant."""
 
     @abstractmethod
-    async def list_for_participant(self, user_id: UUID) -> list[TradeContractDetails]:
-        """List trade contracts visible to a participant."""
-
-    @abstractmethod
-    async def list_admin_details(
+    async def list_for_participant_page(
         self,
-        status: TradeContractStatus | None = None,
-    ) -> list[TradeContractDetails]:
-        """List trade contract read models for admin inspection."""
+        user_id: UUID,
+        *,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+        statuses: tuple[TradeContractStatus, ...] | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[TradeContractDetails], Cursor | None]:
+        """List participant trades with cursor pagination and filters."""
 
     @abstractmethod
-    async def list_due_unfunded_details(self, now: datetime) -> list[TradeContractDetails]:
-        """List unfunded locked trades whose funding deadline has passed."""
+    async def list_admin_details_page(
+        self,
+        *,
+        statuses: tuple[TradeContractStatus, ...] | None = None,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> tuple[list[TradeContractDetails], Cursor | None]:
+        """List trades for admins with cursor pagination."""
 
     @abstractmethod
-    async def cancel_due_unfunded(self, now: datetime) -> int:
-        """Cancel terms-locked trades whose funding deadline has passed."""
+    async def cancel_due_unfunded(self, now: datetime) -> list[TradeContractDetails]:
+        """Atomically cancel due trades and return only changed rows."""
 
 
 class OutboxEventRepositoryProtocol(ABC):
@@ -353,6 +469,17 @@ class OutboxEventRepositoryProtocol(ABC):
         event_type: str | None = None,
     ) -> list[OutboxEvent]:
         """List outbox events for admin inspection."""
+
+    @abstractmethod
+    async def list_admin_page(
+        self,
+        *,
+        status: OutboxEventStatus | None = None,
+        event_type: str | None = None,
+        cursor: Cursor | None = None,
+        limit: int = 50,
+    ) -> tuple[list[OutboxEvent], Cursor | None]:
+        """List outbox events with cursor pagination."""
 
     @abstractmethod
     async def claim_due_for_dispatch(

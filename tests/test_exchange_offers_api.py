@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -177,6 +178,283 @@ async def test_create_exchange_offer_succeeds_and_promotes_request(
         assert exchange_request.status is ExchangeRequestStatus.OFFER_PENDING
 
 
+async def test_update_exchange_offer_persists_rate_and_notifies_request_creator(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = await seed_marketplace_request(
+        session_factory, creator_email="offer-update-owner@example.com"
+    )
+    creator_headers = await login_headers(auth_service, email="offer-update-owner@example.com")
+    _, offer_headers = await create_user_and_token(
+        session_factory, auth_service, email="offer-update-counterparty@example.com"
+    )
+    created = await client.post(
+        f"/api/v1/exchange-requests/{seeded['request_id']}/offers",
+        headers=offer_headers,
+        json={"offered_rate": "1490"},
+    )
+    offer_id = created.json()["id"]
+
+    response = await client.patch(
+        f"/api/v1/offers/{offer_id}",
+        headers=offer_headers,
+        json={"offered_rate": "1510"},
+    )
+
+    assert response.status_code == 200
+    assert Decimal(response.json()["offered_rate"]) == Decimal("1510")
+    creator_view = await client.get(f"/api/v1/offers/{offer_id}", headers=creator_headers)
+    assert creator_view.status_code == 200
+    assert Decimal(creator_view.json()["offered_rate"]) == Decimal("1510")
+    mine_view = await client.get(
+        "/api/v1/offers/mine?min_offered_rate=1500",
+        headers=offer_headers,
+    )
+    assert mine_view.status_code == 200
+    assert [item["id"] for item in mine_view.json()["items"]] == [offer_id]
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        events = await uow.outbox_events.list_admin(event_type="exchange_offer.updated")
+        assert len(events) == 1
+        assert events[0].recipient_user_id is not None
+        assert events[0].payload["offered_rate"] == "1510"
+
+
+async def test_update_exchange_offer_noop_preserves_timestamp_and_emits_no_event(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = await seed_marketplace_request(
+        session_factory, creator_email="offer-noop-owner@example.com"
+    )
+    _, offer_headers = await create_user_and_token(
+        session_factory, auth_service, email="offer-noop-counterparty@example.com"
+    )
+    created = await client.post(
+        f"/api/v1/exchange-requests/{seeded['request_id']}/offers",
+        headers=offer_headers,
+        json={"offered_rate": "1490"},
+    )
+    offer_id = created.json()["id"]
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        before = await uow.exchange_offers.get(UUID(offer_id))
+
+    response = await client.patch(
+        f"/api/v1/offers/{offer_id}",
+        headers=offer_headers,
+        json={"offered_rate": "1490"},
+    )
+
+    assert response.status_code == 200
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        after = await uow.exchange_offers.get(UUID(offer_id))
+        events = await uow.outbox_events.list_admin(event_type="exchange_offer.updated")
+    assert after.updated_at == before.updated_at
+    assert events == []
+
+
+async def test_update_exchange_offer_requires_current_verified_kyc(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = await seed_marketplace_request(
+        session_factory, creator_email="offer-kyc-owner@example.com"
+    )
+    offer_user_id, offer_headers = await create_user_and_token(
+        session_factory, auth_service, email="offer-kyc-counterparty@example.com"
+    )
+    created = await client.post(
+        f"/api/v1/exchange-requests/{seeded['request_id']}/offers",
+        headers=offer_headers,
+        json={"offered_rate": "1490"},
+    )
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        user = await uow.users.get(offer_user_id)
+        await uow.users.update(replace(user, kyc_status=KycStatus.PENDING))
+        await uow.commit()
+
+    response = await client.patch(
+        f"/api/v1/offers/{created.json()['id']}",
+        headers=offer_headers,
+        json={"offered_rate": "1510"},
+    )
+
+    assert response.status_code == 412
+    assert response.json()["error_code"] == "precondition_failed"
+
+
+@pytest.mark.parametrize(
+    ("request_status", "offer_status", "offer_expired", "request_expired"),
+    [
+        (ExchangeRequestStatus.CANCELLED, ExchangeOfferStatus.ACTIVE, False, False),
+        (ExchangeRequestStatus.REQUEST_OPEN, ExchangeOfferStatus.WITHDRAWN, False, False),
+        (ExchangeRequestStatus.REQUEST_OPEN, ExchangeOfferStatus.ACTIVE, True, False),
+        (ExchangeRequestStatus.REQUEST_OPEN, ExchangeOfferStatus.ACTIVE, False, True),
+    ],
+)
+async def test_update_exchange_offer_rejects_terminal_or_expired_market_state(
+    request_status: ExchangeRequestStatus,
+    offer_status: ExchangeOfferStatus,
+    offer_expired: bool,
+    request_expired: bool,
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = await seed_marketplace_request(
+        session_factory,
+        request_status=ExchangeRequestStatus.REQUEST_OPEN,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+        creator_email=f"offer-state-owner-{request_status.value}-{offer_status.value}@example.com",
+    )
+    _, offer_headers = await create_user_and_token(
+        session_factory,
+        auth_service,
+        email=f"offer-state-counterparty-{request_status.value}-{offer_status.value}@example.com",
+    )
+    created = await client.post(
+        f"/api/v1/exchange-requests/{seeded['request_id']}/offers",
+        headers=offer_headers,
+        json={"offered_rate": "1490"},
+    )
+    assert created.status_code == 201
+    offer_id = UUID(created.json()["id"])
+
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        request = await uow.exchange_requests.get(seeded["request_id"])
+        if request_status is not ExchangeRequestStatus.REQUEST_OPEN or request_expired:
+            request = replace(
+                request,
+                status=request_status,
+                expires_at=datetime.now(UTC) - timedelta(minutes=1)
+                if request_expired
+                else request.expires_at,
+            )
+            await uow.exchange_requests.update(request)
+        offer = await uow.exchange_offers.get(offer_id)
+        if offer_status is not ExchangeOfferStatus.ACTIVE or offer_expired:
+            offer = replace(
+                offer,
+                status=offer_status,
+                expires_at=datetime.now(UTC) - timedelta(minutes=1)
+                if offer_expired
+                else offer.expires_at,
+            )
+            await uow.exchange_offers.update(offer)
+        await uow.commit()
+
+    response = await client.patch(
+        f"/api/v1/offers/{offer_id}",
+        headers=offer_headers,
+        json={"offered_rate": "1510"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error_code"] == "invariant_violation"
+
+
+async def test_update_exchange_offer_rejects_rate_below_request_minimum(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = await seed_marketplace_request(
+        session_factory, creator_email="offer-min-update-owner@example.com"
+    )
+    _, offer_headers = await create_user_and_token(
+        session_factory, auth_service, email="offer-min-update-counterparty@example.com"
+    )
+    created = await client.post(
+        f"/api/v1/exchange-requests/{seeded['request_id']}/offers",
+        headers=offer_headers,
+        json={"offered_rate": "1490"},
+    )
+
+    response = await client.patch(
+        f"/api/v1/offers/{created.json()['id']}",
+        headers=offer_headers,
+        json={"offered_rate": "1400"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error_code"] == "invariant_violation"
+
+
+async def test_offer_history_includes_terminal_request_context_for_owner(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = await seed_marketplace_request(
+        session_factory, creator_email="offer-history-owner@example.com"
+    )
+    _, offer_headers = await create_user_and_token(
+        session_factory, auth_service, email="offer-history-counterparty@example.com"
+    )
+    created = await client.post(
+        f"/api/v1/exchange-requests/{seeded['request_id']}/offers",
+        headers=offer_headers,
+        json={"offered_rate": "1490"},
+    )
+    offer_id = UUID(created.json()["id"])
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        request = await uow.exchange_requests.get(seeded["request_id"])
+        await uow.exchange_requests.update(replace(request, status=ExchangeRequestStatus.CANCELLED))
+        await uow.exchange_offers.update(
+            replace(
+                await uow.exchange_offers.get(offer_id),
+                status=ExchangeOfferStatus.WITHDRAWN,
+            )
+        )
+        await uow.commit()
+
+    response = await client.get(f"/api/v1/offers/{offer_id}", headers=offer_headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["request_status"] == "cancelled"
+    assert body["from_currency_code"] == "USD"
+    assert body["to_currency_code"] == "NGN"
+    assert Decimal(body["request_from_amount"]) == Decimal("100")
+    assert Decimal(body["request_preferred_rate"]) == Decimal("1500")
+    assert "creator_user_id" not in body
+
+
+async def test_exchange_offer_visibility_is_limited_to_participants(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = await seed_marketplace_request(
+        session_factory, creator_email="offer-visible-owner@example.com"
+    )
+    creator_headers = await login_headers(auth_service, email="offer-visible-owner@example.com")
+    _, offer_headers = await create_user_and_token(
+        session_factory, auth_service, email="offer-visible-counterparty@example.com"
+    )
+    _, outsider_headers = await create_user_and_token(
+        session_factory, auth_service, email="offer-visible-outsider@example.com"
+    )
+    created = await client.post(
+        f"/api/v1/exchange-requests/{seeded['request_id']}/offers",
+        headers=offer_headers,
+        json={"offered_rate": "1490"},
+    )
+    offer_id = created.json()["id"]
+
+    owner_response = await client.get(f"/api/v1/offers/{offer_id}", headers=offer_headers)
+    creator_response = await client.get(f"/api/v1/offers/{offer_id}", headers=creator_headers)
+    outsider_response = await client.get(f"/api/v1/offers/{offer_id}", headers=outsider_headers)
+
+    assert owner_response.status_code == 200
+    assert creator_response.status_code == 200
+    assert outsider_response.status_code == 404
+
+
 async def test_create_exchange_offer_requires_authentication(
     client: AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],
@@ -311,6 +589,40 @@ async def test_create_exchange_offer_rejects_rate_below_request_minimum(
     assert response.json()["error_code"] == "invariant_violation"
 
 
+async def test_offer_mine_validates_ranges_and_malformed_cursor(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = await seed_marketplace_request(session_factory)
+    _, headers = await create_user_and_token(
+        session_factory, auth_service, email="offer-filter-owner@example.com"
+    )
+    await client.post(
+        f"/api/v1/exchange-requests/{seeded['request_id']}/offers",
+        headers=headers,
+        json={"offered_rate": "1490"},
+    )
+
+    invalid_range = await client.get(
+        "/api/v1/offers/mine?min_offered_rate=1500&max_offered_rate=1400",
+        headers=headers,
+    )
+    invalid_dates = await client.get(
+        "/api/v1/offers/mine?created_from=2026-07-02T00:00:00Z&created_to=2026-07-01T00:00:00Z",
+        headers=headers,
+    )
+    malformed_cursor = await client.get(
+        "/api/v1/offers/mine?cursor=bad",
+        headers=headers,
+    )
+
+    assert invalid_range.status_code == 422
+    assert invalid_range.json()["error_code"] == "invariant_violation"
+    assert invalid_dates.status_code == 422
+    assert malformed_cursor.status_code == 422
+
+
 async def test_list_exchange_request_offers_returns_request_creator_view(
     client: AsyncClient,
     auth_service: AuthService,
@@ -357,9 +669,10 @@ async def test_list_exchange_request_offers_returns_request_creator_view(
     )
 
     assert creator_response.status_code == 200
-    assert len(creator_response.json()) == 2
+    assert len(creator_response.json()["items"]) == 2
     assert all(
-        offer["request_id"] == str(seeded["request_id"]) for offer in creator_response.json()
+        offer["request_id"] == str(seeded["request_id"])
+        for offer in creator_response.json()["items"]
     )
     assert other_response.status_code == 403
     assert other_response.json()["error_code"] == "authorization_error"

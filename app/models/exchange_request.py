@@ -27,6 +27,11 @@ class ExchangeRequestModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "exchange_requests"
 
     creator_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    relisted_from_request_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("exchange_requests.id", ondelete="RESTRICT"),
+        nullable=True,
+        unique=True,
+    )
     from_currency_id: Mapped[UUID] = mapped_column(ForeignKey("currencies.id", ondelete="RESTRICT"))
     to_currency_id: Mapped[UUID] = mapped_column(ForeignKey("currencies.id", ondelete="RESTRICT"))
     from_amount: Mapped[Decimal] = mapped_column(Numeric(24, 8))
@@ -38,6 +43,18 @@ class ExchangeRequestModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     creator: Mapped[UserModel] = relationship()
+    relisted_from_request: Mapped[ExchangeRequestModel | None] = relationship(
+        "ExchangeRequestModel",
+        remote_side="ExchangeRequestModel.id",
+        foreign_keys=[relisted_from_request_id],
+        back_populates="relisted_successor",
+    )
+    relisted_successor: Mapped[ExchangeRequestModel | None] = relationship(
+        "ExchangeRequestModel",
+        foreign_keys=[relisted_from_request_id],
+        back_populates="relisted_from_request",
+        uselist=False,
+    )
     from_currency: Mapped[CurrencyModel] = relationship(foreign_keys=[from_currency_id])
     to_currency: Mapped[CurrencyModel] = relationship(foreign_keys=[to_currency_id])
     offers: Mapped[list[ExchangeOfferModel]] = relationship(
@@ -53,6 +70,7 @@ class ExchangeRequestModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         """Convert the ORM row to a domain entity."""
         return ExchangeRequest(
             id=self.id,
+            relisted_from_request_id=self.relisted_from_request_id,
             creator_user_id=self.creator_user_id,
             from_currency_id=self.from_currency_id,
             to_currency_id=self.to_currency_id,
@@ -69,6 +87,7 @@ class ExchangeRequestModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         """Convert the ORM row and loaded relationships to a read model."""
         return ExchangeRequestDetails(
             id=self.id,
+            relisted_from_request_id=self.relisted_from_request_id,
             creator_user_id=self.creator_user_id,
             from_currency_code=self.from_currency.code,
             to_currency_code=self.to_currency.code,

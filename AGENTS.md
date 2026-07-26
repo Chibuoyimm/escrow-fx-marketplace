@@ -133,6 +133,30 @@ Nigeria KYC has a provider-ready backend foundation.
 - Corridor responses expose currency codes, not internal currency UUIDs.
 - Exchange request creation requires an authenticated, active, KYC-verified user.
 - Exchange request board reads are distinct from "my requests" reads.
+- Request edits are limited to `request_open` records with no historical offers.
+- Offer edits are limited to the owner's active offer before request lock.
+- Relisting creates a new request from an expired/cancelled request; terminal records are immutable.
+- Each request can have at most one direct successor, recorded by
+  `relisted_from_request_id`; a successor can itself be relisted once after it
+  reaches a terminal state.
+- Marketplace and admin list endpoints use `{items, next_cursor}` cursor pagination, ordered by `created_at` and ID. This is an intentional v1 breaking contract change because no frontend/client exists yet; do not add duplicate legacy list endpoints.
+- Creation-date filters are inclusive (`created_from` and `created_to`), and
+  values are normalized to UTC before comparison. Invalid lower/upper ranges
+  are domain validation errors.
+- Offer history responses include request status, currency codes, request amount,
+  preferred rate, and request expiry, without exposing request-owner private data.
+- Request and offer mutations use explicit `SELECT FOR UPDATE` repository
+  methods. Request-row locks are acquired before offer-row locks for offer
+  edits, withdrawal, rejection, and acceptance. Expiry updates retain terminal
+  status predicates so they cannot overwrite accepted or locked transitions.
+- An offer PATCH with the existing rate is a no-op: it does not change
+  `updated_at` or publish `exchange_offer.updated`.
+- Trade acceptance also relies on unique request/offer constraints.
+- Expiry jobs use conditional atomic transitions and publish notifications only
+  for rows returned as changed by those transitions. SQLite tests are
+  deterministic; PostgreSQL multi-worker race testing remains a deployment
+  verification task.
+- New lifecycle notifications are published through `OutboxEventPublisher` as `exchange_offer.updated` and `exchange_request.relisted`.
 - Funding and escrow-leg behavior are intentionally deferred for now.
 
 ## Notification And Outbox Decisions
@@ -158,6 +182,8 @@ Examples:
 
 - `user.email_verification_requested` -> `user-email-verification-requested`
 - `exchange_request.created` -> `exchange-request-created`
+- `exchange_request.relisted` -> `exchange-request-relisted`
+- `exchange_offer.updated` -> `exchange-offer-updated`
 - `trade_contract.locked` -> `trade-contract-locked`
 
 Knock rendering data is sent as uppercase top-level variables, such as:
@@ -211,6 +237,11 @@ Use test depth according to risk:
 - Light live smoke tests are useful after changes touching provider wiring or event payloads.
 
 Do not rely on live Knock/Resend/Gmail tests as the only coverage. They are smoke tests, not repeatable CI coverage.
+
+The default test database is SQLite, which does not provide PostgreSQL row-lock
+semantics. Lock query generation is tested deterministically; a real
+multi-transaction PostgreSQL race test remains a deployment-environment test
+when a safe PostgreSQL test fixture is available.
 
 ## Current Product Gaps
 

@@ -24,7 +24,13 @@ from app.infrastructure.config import settings
 from app.infrastructure.database.unit_of_work import AbstractUnitOfWork
 from app.infrastructure.security import SecurityService
 from app.schemas.auth import AccessTokenResponse
-from app.services._shared import UnitOfWorkFactory, as_utc, build_uow, utc_now
+from app.services._shared import (
+    UnitOfWorkFactory,
+    as_utc,
+    build_uow,
+    format_display_datetime,
+    utc_now,
+)
 from app.services.outbox import OutboxEventPublisher
 
 AUTH_TOKEN_BYTES = 32
@@ -71,8 +77,7 @@ def hash_auth_token(token: str) -> str:
 
 def format_auth_datetime(value: datetime) -> str:
     """Format an auth-related timestamp for customer-facing emails."""
-    formatted = as_utc(value).strftime("%B %d, %Y at %I:%M %p UTC")
-    return formatted.replace(" 0", " ").replace(" at 0", " at ")
+    return format_display_datetime(value)
 
 
 class AuthService:

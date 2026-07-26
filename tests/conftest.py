@@ -159,6 +159,7 @@ def build_exchange_request(
     from_currency_id: UUID,
     to_currency_id: UUID,
     request_id: UUID | None = None,
+    relisted_from_request_id: UUID | None = None,
     from_amount: Decimal = Decimal("100.00"),
     preferred_rate: Decimal = Decimal("1500.00"),
     min_rate: Decimal | None = Decimal("1450.00"),
@@ -170,6 +171,7 @@ def build_exchange_request(
     created = created_at or now()
     return ExchangeRequest(
         id=request_id or uuid4(),
+        relisted_from_request_id=relisted_from_request_id,
         creator_user_id=creator_user_id,
         from_currency_id=from_currency_id,
         to_currency_id=to_currency_id,
