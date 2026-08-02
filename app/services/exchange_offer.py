@@ -19,6 +19,12 @@ from app.domain.exceptions import (
 from app.domain.lifecycle import offer_is_active, request_can_accept_offers
 from app.domain.value_objects import Rate
 from app.infrastructure.database.unit_of_work import AbstractUnitOfWork
+from app.infrastructure.idempotency import (
+    IdempotencyReplay,
+    IdempotencyRequest,
+    claim_idempotency,
+    complete_idempotency,
+)
 from app.infrastructure.pagination import (
     decode_cursor,
     encode_next_cursor,
@@ -85,12 +91,16 @@ class ExchangeOfferService:
         request_id: UUID,
         offer_user_id: UUID,
         offered_rate: Decimal,
-    ) -> ExchangeOfferDetails:
+        idempotency: IdempotencyRequest | None = None,
+    ) -> ExchangeOfferDetails | IdempotencyReplay:
         """Create a counterparty offer on a board-visible exchange request."""
         rate = Rate(value=offered_rate)
         current_time = utc_now()
 
         async with self._uow_factory() as uow:
+            claim = await claim_idempotency(uow, idempotency, now=current_time)
+            if isinstance(claim, IdempotencyReplay):
+                return claim
             initial_request = await uow.exchange_requests.get(request_id)
             if initial_request.creator_user_id == offer_user_id:
                 raise InvariantViolationError("You cannot offer on your own exchange request.")
@@ -157,9 +167,17 @@ class ExchangeOfferService:
                 recipient_user_id=exchange_request.creator_user_id,
                 offered_rate=format_decimal(created.offered_rate),
             )
-            await uow.commit()
             offers = await uow.exchange_offers.list_details_for_request(request_id)
-            return next(offer for offer in offers if offer.id == created.id)
+            response = next(offer for offer in offers if offer.id == created.id)
+            await complete_idempotency(
+                uow,
+                claim,
+                response_status_code=201,
+                response=response,
+                now=current_time,
+            )
+            await uow.commit()
+            return response
 
     async def list_offers_for_request_page(
         self,
@@ -274,11 +292,15 @@ class ExchangeOfferService:
         *,
         offer_id: UUID,
         offer_user_id: UUID,
-    ) -> ExchangeOfferDetails:
+        idempotency: IdempotencyRequest | None = None,
+    ) -> ExchangeOfferDetails | IdempotencyReplay:
         """Withdraw an active offer owned by the authenticated user."""
         current_time = utc_now()
 
         async with self._uow_factory() as uow:
+            claim = await claim_idempotency(uow, idempotency, now=current_time)
+            if isinstance(claim, IdempotencyReplay):
+                return claim
             _, exchange_request, offer = await self._lock_existing_offer_context(uow, offer_id)
             if offer.offer_user_id != offer_user_id:
                 raise NotFoundError(f"Exchange offer '{offer_id}' was not found.")
@@ -322,19 +344,31 @@ class ExchangeOfferService:
                 offer_user_id=offer_user_id,
                 recipient_user_id=exchange_request.creator_user_id,
             )
+            response = await uow.exchange_offers.get_visible_details(offer_id, offer_user_id)
+            await complete_idempotency(
+                uow,
+                claim,
+                response_status_code=200,
+                response=response,
+                now=current_time,
+            )
             await uow.commit()
-            return await uow.exchange_offers.get_visible_details(offer_id, offer_user_id)
+            return response
 
     async def reject_offer(
         self,
         *,
         offer_id: UUID,
         requester_user_id: UUID,
-    ) -> ExchangeOfferDetails:
+        idempotency: IdempotencyRequest | None = None,
+    ) -> ExchangeOfferDetails | IdempotencyReplay:
         """Reject an active offer as the request creator."""
         current_time = utc_now()
 
         async with self._uow_factory() as uow:
+            claim = await claim_idempotency(uow, idempotency, now=current_time)
+            if isinstance(claim, IdempotencyReplay):
+                return claim
             _, exchange_request, offer = await self._lock_existing_offer_context(uow, offer_id)
             if not offer_is_active(offer.status):
                 raise InvariantViolationError("This offer can no longer be rejected.")
@@ -380,8 +414,16 @@ class ExchangeOfferService:
                 recipient_user_id=offer.offer_user_id,
                 requester_user_id=requester_user_id,
             )
+            response = await uow.exchange_offers.get_visible_details(offer_id, requester_user_id)
+            await complete_idempotency(
+                uow,
+                claim,
+                response_status_code=200,
+                response=response,
+                now=current_time,
+            )
             await uow.commit()
-            return await uow.exchange_offers.get_visible_details(offer_id, requester_user_id)
+            return response
 
 
 def get_exchange_offer_service() -> ExchangeOfferService:

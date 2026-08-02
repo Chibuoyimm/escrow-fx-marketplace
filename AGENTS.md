@@ -88,6 +88,7 @@ make seed-reference-data
 make expire-marketplace
 make reconcile-kyc
 make dispatch-notifications
+make cleanup-idempotency
 make run
 ```
 
@@ -179,6 +180,39 @@ Nigeria KYC has a provider-ready backend foundation.
   verification task.
 - New lifecycle notifications are published through `OutboxEventPublisher` as `exchange_offer.updated` and `exchange_request.relisted`.
 - Funding and escrow-leg behavior are intentionally deferred for now.
+
+## Marketplace Idempotency Decisions
+
+- Authenticated non-repeatable marketplace POST mutations accept an optional
+  `Idempotency-Key` header: request creation, request cancellation/relisting,
+  offer creation/withdrawal/rejection, and offer acceptance/trade locking.
+- Keys are validated as 1-128 ASCII letters, digits, `.`, `_`, `~`, or `-`.
+  The database stores only a SHA-256 key hash and canonical request fingerprint;
+  it never stores the raw header, authorization header, passwords, or KYC data.
+- A key is scoped by authenticated principal, operation/resource scope, and key
+  hash. Reusing it with a different canonical payload returns a `409` Problem
+  Details conflict. A completed duplicate returns the original status and JSON
+  response without rerunning domain mutations or outbox publication.
+- Relist fingerprints preserve optional-field presence because omitted fields
+  inherit the original request value while explicit `null` clears a nullable
+  field; those requests are not semantically interchangeable.
+- Claims, business mutations, outbox events, and completed response bodies are
+  committed in the same UoW transaction. The repository uses a savepoint around
+  the unique insert, so PostgreSQL concurrent duplicates wait on the winner and
+  replay after its commit; a rolled-back winner leaves no poisoned key.
+- Durable `processing` claims return `409` with `Retry-After: 1` until their
+  timeout; after that, a retry can reclaim them and expiry cleanup removes any
+  abandoned row. Completed records are retained for
+  `APP_IDEMPOTENCY_RETENTION_HOURS` (24 hours by default).
+- Expected validation, authorization, business-rule, and unexpected exceptions
+  roll back the claim with the surrounding UoW, so a client may retry the same
+  key. A claim that was explicitly committed without completion is treated as
+  in progress until its timeout and then removed by cleanup.
+- Run `make cleanup-idempotency` from a scheduler to remove expired records.
+  The command deletes at most `APP_IDEMPOTENCY_CLEANUP_BATCH_SIZE` rows per run.
+- PATCH mutations and auth/KYC operations are intentionally outside this first
+  milestone. They either already have idempotent assignment semantics or need
+  separate token/security replay contracts.
 
 ## Notification And Outbox Decisions
 
@@ -276,9 +310,10 @@ Use test depth according to risk:
 Do not rely on live Knock/Resend/Gmail tests as the only coverage. They are smoke tests, not repeatable CI coverage.
 
 The default test database is SQLite, which does not provide PostgreSQL row-lock
-semantics. Lock query generation is tested deterministically; a real
-multi-transaction PostgreSQL race test remains a deployment-environment test
-when a safe PostgreSQL test fixture is available.
+semantics. Lock query generation is tested deterministically. Idempotency
+replay behavior is covered with SQLite API/repository tests, and the opt-in
+PostgreSQL suite includes a concurrent duplicate request race that asserts one
+marketplace row and one outbox event.
 
 ## Current Product Gaps
 

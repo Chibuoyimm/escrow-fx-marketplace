@@ -139,3 +139,10 @@ class OutboxEventStatus(StrEnum):
     DELIVERED = "delivered"
     FAILED = "failed"
     DEAD = "dead"
+
+
+class IdempotencyRecordStatus(StrEnum):
+    """Lifecycle states for a mutation idempotency record."""
+
+    PROCESSING = "processing"
+    COMPLETED = "completed"

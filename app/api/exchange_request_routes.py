@@ -6,11 +6,14 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Header, Query, status
+from starlette.responses import Response
 
 from app.api.dependencies import get_current_principal
+from app.api.idempotency import replay_response
 from app.domain.auth import AuthenticatedPrincipal
 from app.domain.enums import ExchangeRequestStatus
+from app.infrastructure.idempotency import IdempotencyReplay, build_idempotency_request
 from app.schemas.exchange_offer import CreateExchangeOfferRequest, ExchangeOfferResponse
 from app.schemas.exchange_request import (
     CreateExchangeRequestRequest,
@@ -46,10 +49,17 @@ created_to_query = Query(default=None)
 )
 async def create_exchange_request(
     payload: CreateExchangeRequestRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     principal: AuthenticatedPrincipal = current_principal_dependency,
     exchange_request_service: ExchangeRequestService = exchange_request_service_dependency,
-) -> ExchangeRequestResponse:
+) -> ExchangeRequestResponse | Response:
     """Create an exchange request for the authenticated user."""
+    idempotency = build_idempotency_request(
+        principal_user_id=principal.user_id,
+        key=idempotency_key,
+        operation_scope="exchange-request.create",
+        payload=payload.model_dump(mode="python", exclude_unset=False),
+    )
     exchange_request = await exchange_request_service.create_request(
         creator_user_id=principal.user_id,
         from_currency_code=payload.from_currency_code,
@@ -57,7 +67,10 @@ async def create_exchange_request(
         from_amount=payload.from_amount,
         preferred_rate=payload.preferred_rate,
         min_rate=payload.min_rate,
+        idempotency=idempotency,
     )
+    if isinstance(exchange_request, IdempotencyReplay):
+        return replay_response(exchange_request)
     return ExchangeRequestResponse.model_validate(exchange_request)
 
 
@@ -145,14 +158,24 @@ async def update_exchange_request(
 @exchange_request_router.post("/{request_id}/cancel", response_model=ExchangeRequestResponse)
 async def cancel_exchange_request(
     request_id: UUID,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     principal: AuthenticatedPrincipal = current_principal_dependency,
     exchange_request_service: ExchangeRequestService = exchange_request_service_dependency,
-) -> ExchangeRequestResponse:
+) -> ExchangeRequestResponse | Response:
     """Cancel an open or pending request owned by the authenticated user."""
+    idempotency = build_idempotency_request(
+        principal_user_id=principal.user_id,
+        key=idempotency_key,
+        operation_scope=f"exchange-request.cancel:{request_id}",
+        payload={},
+    )
     exchange_request = await exchange_request_service.cancel_request(
         request_id=request_id,
         requester_user_id=principal.user_id,
+        idempotency=idempotency,
     )
+    if isinstance(exchange_request, IdempotencyReplay):
+        return replay_response(exchange_request)
     return ExchangeRequestResponse.model_validate(exchange_request)
 
 
@@ -164,11 +187,18 @@ async def cancel_exchange_request(
 async def relist_exchange_request(
     request_id: UUID,
     payload: RelistExchangeRequestRequest | None = None,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     principal: AuthenticatedPrincipal = current_principal_dependency,
     exchange_request_service: ExchangeRequestService = exchange_request_service_dependency,
-) -> ExchangeRequestResponse:
+) -> ExchangeRequestResponse | Response:
     """Create a fresh open request from an expired or cancelled request."""
     payload = payload or RelistExchangeRequestRequest()
+    idempotency = build_idempotency_request(
+        principal_user_id=principal.user_id,
+        key=idempotency_key,
+        operation_scope=f"exchange-request.relist:{request_id}",
+        payload=payload.model_dump(mode="python", exclude_unset=True),
+    )
     exchange_request = await exchange_request_service.relist_request(
         request_id=request_id,
         requester_user_id=principal.user_id,
@@ -176,7 +206,10 @@ async def relist_exchange_request(
         from_amount=payload.from_amount,
         preferred_rate=payload.preferred_rate,
         min_rate=payload.min_rate,
+        idempotency=idempotency,
     )
+    if isinstance(exchange_request, IdempotencyReplay):
+        return replay_response(exchange_request)
     return ExchangeRequestResponse.model_validate(exchange_request)
 
 
@@ -188,15 +221,25 @@ async def relist_exchange_request(
 async def create_exchange_offer(
     request_id: UUID,
     payload: CreateExchangeOfferRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     principal: AuthenticatedPrincipal = current_principal_dependency,
     exchange_offer_service: ExchangeOfferService = exchange_offer_service_dependency,
-) -> ExchangeOfferResponse:
+) -> ExchangeOfferResponse | Response:
     """Create a counterparty offer on a board-visible exchange request."""
+    idempotency = build_idempotency_request(
+        principal_user_id=principal.user_id,
+        key=idempotency_key,
+        operation_scope=f"exchange-offer.create:{request_id}",
+        payload=payload.model_dump(mode="python", exclude_unset=False),
+    )
     exchange_offer = await exchange_offer_service.create_offer(
         request_id=request_id,
         offer_user_id=principal.user_id,
         offered_rate=payload.offered_rate,
+        idempotency=idempotency,
     )
+    if isinstance(exchange_offer, IdempotencyReplay):
+        return replay_response(exchange_offer)
     return ExchangeOfferResponse.model_validate(exchange_offer)
 
 

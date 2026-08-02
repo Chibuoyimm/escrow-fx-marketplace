@@ -22,6 +22,12 @@ from app.domain.exceptions import (
     PreconditionFailedError,
 )
 from app.domain.lifecycle import offer_is_active, request_can_accept_offers
+from app.infrastructure.idempotency import (
+    IdempotencyReplay,
+    IdempotencyRequest,
+    claim_idempotency,
+    complete_idempotency,
+)
 from app.infrastructure.pagination import decode_cursor, encode_next_cursor, normalize_date_range
 from app.services._shared import (
     UnitOfWorkFactory,
@@ -49,11 +55,15 @@ class TradeService:
         *,
         offer_id: UUID,
         requester_user_id: UUID,
-    ) -> TradeContractDetails:
+        idempotency: IdempotencyRequest | None = None,
+    ) -> TradeContractDetails | IdempotencyReplay:
         """Accept an offer and create the initial trade contract."""
         current_time = utc_now()
 
         async with self._uow_factory() as uow:
+            claim = await claim_idempotency(uow, idempotency, now=current_time)
+            if isinstance(claim, IdempotencyReplay):
+                return claim
             initial_offer = await uow.exchange_offers.get(offer_id)
             initial_request = await uow.exchange_requests.get(initial_offer.request_id)
             if initial_request.creator_user_id != requester_user_id:
@@ -188,11 +198,19 @@ class TradeService:
                     recipient_user_id=recipient_user_id,
                 )
 
-            await uow.commit()
-            return await uow.trade_contracts.get_for_participant(
+            response = await uow.trade_contracts.get_for_participant(
                 trade_contract.id,
                 requester_user_id,
             )
+            await complete_idempotency(
+                uow,
+                claim,
+                response_status_code=200,
+                response=response,
+                now=current_time,
+            )
+            await uow.commit()
+            return response
 
     async def get_trade_for_participant(
         self,

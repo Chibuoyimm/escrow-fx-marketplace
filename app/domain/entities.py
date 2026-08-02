@@ -15,6 +15,7 @@ from app.domain.enums import (
     ExchangeOfferStatus,
     ExchangeRequestStatus,
     FlowType,
+    IdempotencyRecordStatus,
     KycIdType,
     KycProvider,
     KycStatus,
@@ -298,3 +299,21 @@ class OutboxEvent:
     last_error: str | None
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class IdempotencyRecord:
+    """Durable replay state for one authenticated mutation key."""
+
+    id: UUID
+    principal_user_id: UUID
+    operation_scope: str
+    key_hash: str
+    request_fingerprint: str
+    status: IdempotencyRecordStatus
+    response_status_code: int | None
+    response_body: dict[str, Any] | None
+    created_at: datetime
+    updated_at: datetime
+    expires_at: datetime
+    completed_at: datetime | None

@@ -58,12 +58,30 @@ class NotFoundError(AppError):
 class ConflictError(AppError):
     """Raised when a resource conflicts with existing state."""
 
-    def __init__(self, detail: str) -> None:
+    def __init__(self, detail: str, headers: dict[str, str] | None = None) -> None:
         super().__init__(
             title="Conflict",
             detail=detail,
             error_code=ErrorCode.CONFLICT,
             status_code=409,
+            headers=headers,
+        )
+
+
+class IdempotencyConflictError(ConflictError):
+    """Raised when a key is reused for a different canonical request."""
+
+    def __init__(self) -> None:
+        super().__init__("That Idempotency-Key was already used with a different request payload.")
+
+
+class IdempotencyInProgressError(ConflictError):
+    """Raised when a durable idempotency claim needs a retry."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "That Idempotency-Key is currently being processed; retry the request.",
+            headers={"Retry-After": "1"},
         )
 
 

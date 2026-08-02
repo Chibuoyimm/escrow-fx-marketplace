@@ -251,6 +251,45 @@ Expire due marketplace records with:
 make expire-marketplace
 ```
 
+## Mutation Idempotency
+
+High-value marketplace POST mutations accept an optional `Idempotency-Key`
+header. It is supported by request creation, cancellation, relisting, offer
+creation, offer withdrawal/rejection, and offer acceptance/trade locking.
+
+```http
+Idempotency-Key: create-request-2026-08-02-001
+```
+
+Keys must be 1-128 characters from ASCII letters, digits, `.`, `_`, `~`, and
+`-`. The key is scoped to the authenticated user and operation/resource route.
+Repeating the same key with the same semantic payload returns the original
+status and response without creating another marketplace row or notification
+outbox event. Reusing it with a different payload returns a `409` Problem
+Details response. Authentication, schema validation, and business-rule
+failures do not reserve a key because the claim is rolled back with the
+mutation transaction. Unexpected exceptions also roll back the claim; a client
+can safely retry the same key. An explicitly committed but incomplete claim
+returns `409` with `Retry-After: 1` until its processing timeout; after that,
+a retry can reclaim it and the cleanup command removes any abandoned row.
+Relist fingerprints preserve optional-field presence: omitting a field inherits
+the original request value, while an explicit `null` clears a nullable field,
+so those requests use different keys or receive a conflict.
+
+The database stores only hashed key/fingerprint values and the safe customer
+response needed for replay. Completed records are retained for 24 hours by
+default. Run the bounded cleanup command from cron or another scheduler:
+
+```bash
+make cleanup-idempotency
+```
+
+Configure retention, abandoned-claim timeout, and cleanup batch size with
+`APP_IDEMPOTENCY_RETENTION_HOURS`,
+`APP_IDEMPOTENCY_PROCESSING_TIMEOUT_SECONDS`, and
+`APP_IDEMPOTENCY_CLEANUP_BATCH_SIZE`. Do not send passwords, authorization
+headers, raw KYC data, or secrets in idempotency payloads.
+
 The expiry command updates stale marketplace state and records outbox events for
 affected users. It also records a summary `marketplace_expiry.completed` event
 for operational inspection.

@@ -18,6 +18,7 @@ from app.domain.entities import (
     ExchangeOfferDetails,
     ExchangeRequest,
     ExchangeRequestDetails,
+    IdempotencyRecord,
     KycVerification,
     OutboxEvent,
     PasswordResetToken,
@@ -84,6 +85,37 @@ class AccountAuditEventRepositoryProtocol(ABC):
     @abstractmethod
     async def list_for_subject(self, subject_user_id: UUID) -> list[AccountAuditEvent]:
         """List account audit events for a subject user."""
+
+
+class IdempotencyRecordRepositoryProtocol(ABC):
+    """Transactional mutation idempotency record contract."""
+
+    @abstractmethod
+    async def claim(
+        self,
+        *,
+        principal_user_id: UUID,
+        operation_scope: str,
+        key_hash: str,
+        request_fingerprint: str,
+        now: datetime,
+    ) -> IdempotencyRecord:
+        """Claim a key or return the committed record for it."""
+
+    @abstractmethod
+    async def complete(
+        self,
+        *,
+        record_id: UUID,
+        response_status_code: int,
+        response_body: dict[str, object],
+        now: datetime,
+    ) -> IdempotencyRecord:
+        """Persist the replay response for a claimed key."""
+
+    @abstractmethod
+    async def delete_expired(self, *, now: datetime, limit: int) -> int:
+        """Delete expired replay records for scheduled retention cleanup."""
 
 
 class EmailVerificationTokenRepositoryProtocol(ABC):

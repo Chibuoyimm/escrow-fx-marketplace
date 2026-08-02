@@ -7,6 +7,7 @@ from app.models.currency import CurrencyModel
 from app.models.email_verification_token import EmailVerificationTokenModel
 from app.models.exchange_offer import ExchangeOfferModel
 from app.models.exchange_request import ExchangeRequestModel
+from app.models.idempotency_record import IdempotencyRecordModel
 from app.models.kyc_verification import KycVerificationModel
 from app.models.outbox_event import OutboxEventModel
 from app.models.password_reset_token import PasswordResetTokenModel
@@ -23,6 +24,7 @@ __all__ = [
     "ExchangeOfferModel",
     "ExchangeRequestModel",
     "KycVerificationModel",
+    "IdempotencyRecordModel",
     "OutboxEventModel",
     "PasswordResetTokenModel",
     "TradeContractModel",

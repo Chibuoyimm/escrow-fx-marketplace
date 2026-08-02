@@ -29,6 +29,12 @@ from app.domain.lifecycle import (
 )
 from app.domain.value_objects import Money, Rate
 from app.infrastructure.config import settings
+from app.infrastructure.idempotency import (
+    IdempotencyReplay,
+    IdempotencyRequest,
+    claim_idempotency,
+    complete_idempotency,
+)
 from app.infrastructure.pagination import (
     decode_cursor,
     encode_next_cursor,
@@ -66,7 +72,8 @@ class ExchangeRequestService:
         from_amount: Decimal,
         preferred_rate: Decimal,
         min_rate: Decimal | None,
-    ) -> ExchangeRequestDetails:
+        idempotency: IdempotencyRequest | None = None,
+    ) -> ExchangeRequestDetails | IdempotencyReplay:
         """Create a new exchange request for the authenticated user."""
         normalized_from = self._normalize_currency_code(from_currency_code)
         normalized_to = self._normalize_currency_code(to_currency_code)
@@ -80,7 +87,11 @@ class ExchangeRequestService:
         if minimum is not None and minimum.value > preferred.value:
             raise InvariantViolationError("Minimum rate cannot be greater than preferred rate.")
 
+        current_time = utc_now()
         async with self._uow_factory() as uow:
+            claim = await claim_idempotency(uow, idempotency, now=current_time)
+            if isinstance(claim, IdempotencyReplay):
+                return claim
             user = await uow.users.get_for_update(creator_user_id)
             if user.status is not UserStatus.ACTIVE:
                 raise PreconditionFailedError("Only active users can create exchange requests.")
@@ -149,8 +160,16 @@ class ExchangeRequestService:
                     format_decimal(created.min_rate) if created.min_rate is not None else None
                 ),
             )
+            response = await uow.exchange_requests.get_details_for_user(created.id, user.id)
+            await complete_idempotency(
+                uow,
+                claim,
+                response_status_code=201,
+                response=response,
+                now=current_time,
+            )
             await uow.commit()
-            return await uow.exchange_requests.get_details_for_user(created.id, user.id)
+            return response
 
     async def list_board_requests_page(
         self,
@@ -226,11 +245,15 @@ class ExchangeRequestService:
         *,
         request_id: UUID,
         requester_user_id: UUID,
-    ) -> ExchangeRequestDetails:
+        idempotency: IdempotencyRequest | None = None,
+    ) -> ExchangeRequestDetails | IdempotencyReplay:
         """Cancel an open or pending request owned by the authenticated user."""
         current_time = utc_now()
 
         async with self._uow_factory() as uow:
+            claim = await claim_idempotency(uow, idempotency, now=current_time)
+            if isinstance(claim, IdempotencyReplay):
+                return claim
             initial_request = await uow.exchange_requests.get(request_id)
             if initial_request.creator_user_id != requester_user_id:
                 raise NotFoundError(f"Exchange request '{request_id}' was not found.")
@@ -300,8 +323,18 @@ class ExchangeRequestService:
                     reason="request_cancelled",
                 )
 
+            response = await uow.exchange_requests.get_details_for_user(
+                request_id, requester_user_id
+            )
+            await complete_idempotency(
+                uow,
+                claim,
+                response_status_code=200,
+                response=response,
+                now=current_time,
+            )
             await uow.commit()
-            return await uow.exchange_requests.get_details_for_user(request_id, requester_user_id)
+            return response
 
     async def update_request(
         self,
@@ -369,10 +402,14 @@ class ExchangeRequestService:
         from_amount: Decimal | None,
         preferred_rate: Decimal | None,
         min_rate: Decimal | None,
-    ) -> ExchangeRequestDetails:
+        idempotency: IdempotencyRequest | None = None,
+    ) -> ExchangeRequestDetails | IdempotencyReplay:
         """Create a new request from an expired or cancelled request."""
         current_time = utc_now()
         async with self._uow_factory() as uow:
+            claim = await claim_idempotency(uow, idempotency, now=current_time)
+            if isinstance(claim, IdempotencyReplay):
+                return claim
             initial_request = await uow.exchange_requests.get(request_id)
             if initial_request.creator_user_id != requester_user_id:
                 raise NotFoundError(f"Exchange request '{request_id}' was not found.")
@@ -451,8 +488,18 @@ class ExchangeRequestService:
                 min_rate=format_decimal(created.min_rate) if created.min_rate is not None else None,
                 expires_at=created.expires_at,
             )
+            response = await uow.exchange_requests.get_details_for_user(
+                created.id, requester_user_id
+            )
+            await complete_idempotency(
+                uow,
+                claim,
+                response_status_code=201,
+                response=response,
+                now=current_time,
+            )
             await uow.commit()
-            return await uow.exchange_requests.get_details_for_user(created.id, requester_user_id)
+            return response
 
     @staticmethod
     def _require_active_verified_user(status: UserStatus, kyc_status: KycStatus) -> None:

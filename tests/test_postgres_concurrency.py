@@ -7,10 +7,11 @@ import os
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -33,16 +34,20 @@ from app.domain.enums import (
     OutboxEventStatus,
     UserStatus,
 )
-from app.domain.exceptions import PreconditionFailedError
+from app.domain.exceptions import IdempotencyConflictError, PreconditionFailedError
 from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
+from app.infrastructure.idempotency import IdempotencyReplay, IdempotencyRequest
 from app.infrastructure.security import SecurityService
 from app.integrations.youverify import KycProviderRequest, KycProviderResult
 from app.models import Base
+from app.models.exchange_request import ExchangeRequestModel
+from app.models.idempotency_record import IdempotencyRecordModel
 from app.models.outbox_event import OutboxEventModel
 from app.services.auth import AuthService, hash_auth_token
+from app.services.exchange_request import ExchangeRequestService
 from app.services.kyc import KycService
 from app.services.outbox import build_outbox_event
-from tests.conftest import build_user
+from tests.conftest import build_corridor, build_currency, build_user
 
 pytestmark = pytest.mark.anyio
 
@@ -173,6 +178,181 @@ async def test_password_write_preserves_concurrent_suspension(
     assert stale_snapshot.status is UserStatus.ACTIVE
     assert saved.status is UserStatus.SUSPENDED
     assert saved.password_hash == "new-password-hash"
+
+
+async def test_duplicate_exchange_request_idempotency_is_single_mutation_postgres(
+    postgres_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    user = await _create_user(postgres_session_factory, f"idempotency-race-{uuid4()}@example.com")
+    async with SqlAlchemyUnitOfWork(postgres_session_factory) as uow:
+        usd = await uow.currencies.add(build_currency(code="USD"))
+        ngn = await uow.currencies.add(build_currency(code="NGN"))
+        await uow.corridors.add(build_corridor(from_currency_id=usd.id, to_currency_id=ngn.id))
+        await uow.commit()
+
+    idempotency = IdempotencyRequest(
+        principal_user_id=user.id,
+        operation_scope="exchange-request.create",
+        key_hash="a" * 64,
+        request_fingerprint="b" * 64,
+    )
+    services = [
+        ExchangeRequestService(uow_factory=lambda: SqlAlchemyUnitOfWork(postgres_session_factory))
+        for _ in range(2)
+    ]
+    outcomes = await asyncio.gather(
+        *(
+            service.create_request(
+                creator_user_id=user.id,
+                from_currency_code="USD",
+                to_currency_code="NGN",
+                from_amount=Decimal("100"),
+                preferred_rate=Decimal("1500"),
+                min_rate=Decimal("1450"),
+                idempotency=idempotency,
+            )
+            for service in services
+        ),
+        return_exceptions=True,
+    )
+
+    assert sum(isinstance(outcome, IdempotencyReplay) for outcome in outcomes) == 1
+    assert (
+        sum(
+            not isinstance(outcome, Exception) and not isinstance(outcome, IdempotencyReplay)
+            for outcome in outcomes
+        )
+        == 1
+    )
+    async with postgres_session_factory() as session:
+        request_count = await session.scalar(select(func.count()).select_from(ExchangeRequestModel))
+        event_count = await session.scalar(select(func.count()).select_from(OutboxEventModel))
+        idempotency_count = await session.scalar(
+            select(func.count()).select_from(IdempotencyRecordModel)
+        )
+    assert request_count == 1
+    assert event_count == 1
+    assert idempotency_count == 1
+
+
+async def test_concurrent_different_fingerprints_have_one_conflict_postgres(
+    postgres_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    user = await _create_user(
+        postgres_session_factory,
+        f"idempotency-fingerprint-race-{uuid4()}@example.com",
+    )
+    async with SqlAlchemyUnitOfWork(postgres_session_factory) as uow:
+        usd = await uow.currencies.add(build_currency(code="USD"))
+        ngn = await uow.currencies.add(build_currency(code="NGN"))
+        await uow.corridors.add(build_corridor(from_currency_id=usd.id, to_currency_id=ngn.id))
+        await uow.commit()
+
+    requests = [
+        IdempotencyRequest(
+            principal_user_id=user.id,
+            operation_scope="exchange-request.create",
+            key_hash="c" * 64,
+            request_fingerprint="d" * 64,
+        ),
+        IdempotencyRequest(
+            principal_user_id=user.id,
+            operation_scope="exchange-request.create",
+            key_hash="c" * 64,
+            request_fingerprint="e" * 64,
+        ),
+    ]
+    services = [
+        ExchangeRequestService(uow_factory=lambda: SqlAlchemyUnitOfWork(postgres_session_factory))
+        for _ in requests
+    ]
+    outcomes = await asyncio.gather(
+        *(
+            service.create_request(
+                creator_user_id=user.id,
+                from_currency_code="USD",
+                to_currency_code="NGN",
+                from_amount=Decimal("100"),
+                preferred_rate=Decimal("1500"),
+                min_rate=Decimal("1450"),
+                idempotency=idempotency,
+            )
+            for service, idempotency in zip(services, requests, strict=True)
+        ),
+        return_exceptions=True,
+    )
+
+    assert sum(isinstance(outcome, IdempotencyConflictError) for outcome in outcomes) == 1
+    assert (
+        sum(
+            not isinstance(outcome, Exception) and not isinstance(outcome, IdempotencyReplay)
+            for outcome in outcomes
+        )
+        == 1
+    )
+    async with postgres_session_factory() as session:
+        request_count = await session.scalar(select(func.count()).select_from(ExchangeRequestModel))
+        event_count = await session.scalar(select(func.count()).select_from(OutboxEventModel))
+        idempotency_count = await session.scalar(
+            select(func.count()).select_from(IdempotencyRecordModel)
+        )
+    assert request_count == 1
+    assert event_count == 1
+    assert idempotency_count == 1
+
+
+async def test_rolled_back_idempotency_claim_can_be_reclaimed_postgres(
+    postgres_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    user = await _create_user(
+        postgres_session_factory,
+        f"idempotency-rollback-recovery-{uuid4()}@example.com",
+    )
+    async with SqlAlchemyUnitOfWork(postgres_session_factory) as uow:
+        usd = await uow.currencies.add(build_currency(code="USD"))
+        ngn = await uow.currencies.add(build_currency(code="NGN"))
+        await uow.corridors.add(build_corridor(from_currency_id=usd.id, to_currency_id=ngn.id))
+        await uow.commit()
+
+    idempotency = IdempotencyRequest(
+        principal_user_id=user.id,
+        operation_scope="exchange-request.create",
+        key_hash="f" * 64,
+        request_fingerprint="g" * 64,
+    )
+    async with SqlAlchemyUnitOfWork(postgres_session_factory) as failed_uow:
+        await failed_uow.idempotency_records.claim(
+            principal_user_id=idempotency.principal_user_id,
+            operation_scope=idempotency.operation_scope,
+            key_hash=idempotency.key_hash,
+            request_fingerprint=idempotency.request_fingerprint,
+            now=datetime.now(UTC),
+        )
+        await failed_uow.rollback()
+
+    service = ExchangeRequestService(
+        uow_factory=lambda: SqlAlchemyUnitOfWork(postgres_session_factory)
+    )
+    outcome = await service.create_request(
+        creator_user_id=user.id,
+        from_currency_code="USD",
+        to_currency_code="NGN",
+        from_amount=Decimal("100"),
+        preferred_rate=Decimal("1500"),
+        min_rate=Decimal("1450"),
+        idempotency=idempotency,
+    )
+
+    assert not isinstance(outcome, IdempotencyReplay)
+    async with postgres_session_factory() as session:
+        request_count = await session.scalar(select(func.count()).select_from(ExchangeRequestModel))
+        event_count = await session.scalar(select(func.count()).select_from(OutboxEventModel))
+        idempotency_count = await session.scalar(
+            select(func.count()).select_from(IdempotencyRecordModel)
+        )
+    assert request_count == 1
+    assert event_count == 1
+    assert idempotency_count == 1
 
 
 async def test_kyc_write_preserves_concurrent_deactivation(

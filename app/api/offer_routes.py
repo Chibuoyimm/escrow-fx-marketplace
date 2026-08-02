@@ -6,11 +6,14 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, Query
+from starlette.responses import Response
 
 from app.api.dependencies import get_current_principal
+from app.api.idempotency import replay_response
 from app.domain.auth import AuthenticatedPrincipal
 from app.domain.enums import ExchangeOfferStatus
+from app.infrastructure.idempotency import IdempotencyReplay, build_idempotency_request
 from app.schemas.exchange_offer import ExchangeOfferResponse, UpdateExchangeOfferRequest
 from app.schemas.pagination import CursorPage
 from app.schemas.trade import TradeContractResponse
@@ -33,14 +36,24 @@ created_to_query = Query(default=None)
 @offer_router.post("/{offer_id}/withdraw", response_model=ExchangeOfferResponse)
 async def withdraw_exchange_offer(
     offer_id: UUID,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     principal: AuthenticatedPrincipal = current_principal_dependency,
     exchange_offer_service: ExchangeOfferService = exchange_offer_service_dependency,
-) -> ExchangeOfferResponse:
+) -> ExchangeOfferResponse | Response:
     """Withdraw an active offer owned by the authenticated user."""
+    idempotency = build_idempotency_request(
+        principal_user_id=principal.user_id,
+        key=idempotency_key,
+        operation_scope=f"exchange-offer.withdraw:{offer_id}",
+        payload={},
+    )
     exchange_offer = await exchange_offer_service.withdraw_offer(
         offer_id=offer_id,
         offer_user_id=principal.user_id,
+        idempotency=idempotency,
     )
+    if isinstance(exchange_offer, IdempotencyReplay):
+        return replay_response(exchange_offer)
     return ExchangeOfferResponse.model_validate(exchange_offer)
 
 
@@ -106,26 +119,46 @@ async def get_exchange_offer(
 @offer_router.post("/{offer_id}/reject", response_model=ExchangeOfferResponse)
 async def reject_exchange_offer(
     offer_id: UUID,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     principal: AuthenticatedPrincipal = current_principal_dependency,
     exchange_offer_service: ExchangeOfferService = exchange_offer_service_dependency,
-) -> ExchangeOfferResponse:
+) -> ExchangeOfferResponse | Response:
     """Reject an active offer as the request creator."""
+    idempotency = build_idempotency_request(
+        principal_user_id=principal.user_id,
+        key=idempotency_key,
+        operation_scope=f"exchange-offer.reject:{offer_id}",
+        payload={},
+    )
     exchange_offer = await exchange_offer_service.reject_offer(
         offer_id=offer_id,
         requester_user_id=principal.user_id,
+        idempotency=idempotency,
     )
+    if isinstance(exchange_offer, IdempotencyReplay):
+        return replay_response(exchange_offer)
     return ExchangeOfferResponse.model_validate(exchange_offer)
 
 
 @offer_router.post("/{offer_id}/accept", response_model=TradeContractResponse)
 async def accept_exchange_offer(
     offer_id: UUID,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     principal: AuthenticatedPrincipal = current_principal_dependency,
     trade_service: TradeService = trade_service_dependency,
-) -> TradeContractResponse:
+) -> TradeContractResponse | Response:
     """Accept an exchange offer and lock the initial trade."""
+    idempotency = build_idempotency_request(
+        principal_user_id=principal.user_id,
+        key=idempotency_key,
+        operation_scope=f"exchange-offer.accept:{offer_id}",
+        payload={},
+    )
     trade = await trade_service.accept_offer(
         offer_id=offer_id,
         requester_user_id=principal.user_id,
+        idempotency=idempotency,
     )
+    if isinstance(trade, IdempotencyReplay):
+        return replay_response(trade)
     return TradeContractResponse.model_validate(trade)

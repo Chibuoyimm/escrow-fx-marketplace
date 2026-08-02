@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     notification_max_attempts: int = 5
     notification_retry_base_seconds: int = 30
     notification_retry_max_seconds: int = 3600
+    idempotency_retention_hours: int = 24
+    idempotency_processing_timeout_seconds: int = 300
+    idempotency_cleanup_batch_size: int = 1000
     notification_provider: str = "logging"
     notification_public_base_url: str = "http://localhost:8000"
     knock_api_key: str | None = None

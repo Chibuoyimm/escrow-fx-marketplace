@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from sqlalchemy import Select, and_, or_, select, update
+from sqlalchemy import Select, and_, delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload, with_loader_criteria
@@ -23,6 +23,7 @@ from app.domain.entities import (
     ExchangeOfferDetails,
     ExchangeRequest,
     ExchangeRequestDetails,
+    IdempotencyRecord,
     KycVerification,
     OutboxEvent,
     PasswordResetToken,
@@ -35,13 +36,20 @@ from app.domain.enums import (
     CurrencyStatus,
     ExchangeOfferStatus,
     ExchangeRequestStatus,
+    IdempotencyRecordStatus,
     KycVerificationStatus,
     OutboxEventStatus,
     RailStatus,
     TradeContractStatus,
     UserStatus,
 )
-from app.domain.exceptions import ConflictError, NotFoundError
+from app.domain.exceptions import (
+    ConflictError,
+    IdempotencyConflictError,
+    IdempotencyInProgressError,
+    NotFoundError,
+)
+from app.infrastructure.config import settings
 from app.infrastructure.exceptions import InfrastructureError
 from app.infrastructure.pagination import Cursor
 from app.models.account_audit_event import AccountAuditEventModel
@@ -50,6 +58,7 @@ from app.models.currency import CurrencyModel
 from app.models.email_verification_token import EmailVerificationTokenModel
 from app.models.exchange_offer import ExchangeOfferModel
 from app.models.exchange_request import ExchangeRequestModel
+from app.models.idempotency_record import IdempotencyRecordModel
 from app.models.kyc_verification import KycVerificationModel
 from app.models.outbox_event import OutboxEventModel
 from app.models.password_reset_token import PasswordResetTokenModel
@@ -63,6 +72,7 @@ from app.repositories.protocols import (
     EmailVerificationTokenRepositoryProtocol,
     ExchangeOfferRepositoryProtocol,
     ExchangeRequestRepositoryProtocol,
+    IdempotencyRecordRepositoryProtocol,
     KycVerificationRepositoryProtocol,
     OutboxEventRepositoryProtocol,
     PasswordResetTokenRepositoryProtocol,
@@ -1407,6 +1417,119 @@ class SqlAlchemyTradeContractRepository(SqlAlchemyRepository, TradeContractRepos
         )
         result = await self.session.execute(statement)
         return result.scalar_one_or_none() is not None
+
+
+class SqlAlchemyIdempotencyRecordRepository(
+    SqlAlchemyRepository,
+    IdempotencyRecordRepositoryProtocol,
+):
+    """Transactional idempotency record repository."""
+
+    async def claim(
+        self,
+        *,
+        principal_user_id: UUID,
+        operation_scope: str,
+        key_hash: str,
+        request_fingerprint: str,
+        now: datetime,
+    ) -> IdempotencyRecord:
+        """Claim a key without an unsafe read-then-insert race."""
+        record = IdempotencyRecordModel(
+            id=uuid4(),
+            principal_user_id=principal_user_id,
+            operation_scope=operation_scope,
+            key_hash=key_hash,
+            request_fingerprint=request_fingerprint,
+            status=IdempotencyRecordStatus.PROCESSING,
+            response_status_code=None,
+            response_body=None,
+            created_at=now,
+            updated_at=now,
+            expires_at=now + timedelta(seconds=settings.idempotency_processing_timeout_seconds),
+            completed_at=None,
+        )
+        try:
+            async with self.session.begin_nested():
+                self.session.add(record)
+                await self.session.flush()
+        except IntegrityError as exc:
+            statement: Select[tuple[IdempotencyRecordModel]] = (
+                select(IdempotencyRecordModel)
+                .where(
+                    IdempotencyRecordModel.principal_user_id == principal_user_id,
+                    IdempotencyRecordModel.operation_scope == operation_scope,
+                    IdempotencyRecordModel.key_hash == key_hash,
+                )
+                .with_for_update()
+            )
+            result = await self.session.execute(statement)
+            existing = result.scalar_one_or_none()
+            if existing is None:
+                raise ConflictError(
+                    "The idempotency request could not be claimed; retry it."
+                ) from exc
+
+            if self._as_utc(existing.expires_at) <= self._as_utc(now):
+                await self.session.delete(existing)
+                await self.session.flush()
+                self.session.add(record)
+                await self.session.flush()
+                return record.to_domain()
+
+            if existing.request_fingerprint != request_fingerprint:
+                raise IdempotencyConflictError() from exc
+            if existing.status is IdempotencyRecordStatus.PROCESSING:
+                raise IdempotencyInProgressError() from exc
+            return existing.to_domain()
+        return record.to_domain()
+
+    async def complete(
+        self,
+        *,
+        record_id: UUID,
+        response_status_code: int,
+        response_body: dict[str, object],
+        now: datetime,
+    ) -> IdempotencyRecord:
+        """Complete a claim while it is part of the business transaction."""
+        record = await self.session.get(IdempotencyRecordModel, record_id)
+        if record is None:
+            raise NotFoundError(f"Idempotency record '{record_id}' was not found.")
+        if record.status is not IdempotencyRecordStatus.PROCESSING:
+            raise ConflictError("That idempotency request has already been completed.")
+
+        record.status = IdempotencyRecordStatus.COMPLETED
+        record.response_status_code = response_status_code
+        record.response_body = response_body
+        record.updated_at = now
+        record.expires_at = now + timedelta(hours=settings.idempotency_retention_hours)
+        record.completed_at = now
+        await self._flush_or_raise_conflict("The idempotency response could not be saved.")
+        return record.to_domain()
+
+    async def delete_expired(self, *, now: datetime, limit: int) -> int:
+        """Delete expired replay and abandoned processing records in bounded batches."""
+        statement = (
+            select(IdempotencyRecordModel.id)
+            .where(IdempotencyRecordModel.expires_at <= now)
+            .order_by(IdempotencyRecordModel.expires_at.asc())
+            .limit(limit)
+        )
+        result = await self.session.execute(statement)
+        record_ids = result.scalars().all()
+        if not record_ids:
+            return 0
+        deleted = await self.session.execute(
+            delete(IdempotencyRecordModel).where(IdempotencyRecordModel.id.in_(record_ids))
+        )
+        return self._rowcount(deleted)
+
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
 
 class SqlAlchemyOutboxEventRepository(SqlAlchemyRepository, OutboxEventRepositoryProtocol):

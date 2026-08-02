@@ -48,6 +48,9 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     account_audit_columns = {
         column["name"] for column in inspector.get_columns("account_audit_events")
     }
+    idempotency_columns = {
+        column["name"] for column in inspector.get_columns("idempotency_records")
+    }
     audit_event_column = next(
         column
         for column in inspector.get_columns("account_audit_events")
@@ -66,6 +69,7 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     assert "email_verification_tokens" in inspector.get_table_names()
     assert "password_reset_tokens" in inspector.get_table_names()
     assert "kyc_verifications" in inspector.get_table_names()
+    assert "idempotency_records" in inspector.get_table_names()
     assert "password_hash" in user_columns
     assert "email_verified_at" in user_columns
     assert "token_hash" in email_verification_token_columns
@@ -85,6 +89,19 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     assert {"subject_user_id", "actor_user_id", "event_type", "occurred_at", "metadata"} <= {
         *account_audit_columns
     }
+    assert {
+        "principal_user_id",
+        "operation_scope",
+        "key_hash",
+        "request_fingerprint",
+        "status",
+        "response_status_code",
+        "response_body",
+        "created_at",
+        "updated_at",
+        "expires_at",
+        "completed_at",
+    } <= idempotency_columns
     assert getattr(audit_event_column["type"], "length", None) == 64
     assert getattr(AccountAuditEventModel.__table__.c.event_type.type, "length", None) == 64
     assert {
@@ -108,6 +125,13 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
         and foreign_key["constrained_columns"] == ["relisted_from_request_id"]
         for foreign_key in request_foreign_keys
     )
+    idempotency_unique_constraints = {
+        constraint["name"] for constraint in inspector.get_unique_constraints("idempotency_records")
+    }
+    assert "uq_idempotency_records_principal_scope_key" in idempotency_unique_constraints
+    assert "ix_idempotency_records_expires_at" in {
+        index["name"] for index in inspector.get_indexes("idempotency_records")
+    }
 
     migration_text = Path(
         "alembic/versions/20260726_0011_add_request_lineage_and_marketplace_indexes.py"
@@ -130,6 +154,7 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     }
     assert "relisted_from_request_id" not in downgraded_columns
     assert "account_audit_events" not in downgraded_inspector.get_table_names()
+    assert "idempotency_records" not in downgraded_inspector.get_table_names()
     assert "ix_exchange_requests_creator_created_id" not in {
         index["name"] for index in downgraded_inspector.get_indexes("exchange_requests")
     }
