@@ -1,5 +1,6 @@
 """Application configuration."""
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,6 +29,15 @@ class Settings(BaseSettings):
     idempotency_retention_hours: int = 24
     idempotency_processing_timeout_seconds: int = 300
     idempotency_cleanup_batch_size: int = 1000
+    rate_limit_enabled: bool = True
+    rate_limit_cleanup_batch_size: int = 1000
+    rate_limit_policy_overrides: dict[str, dict[str, int]] = Field(default_factory=dict)
+    rate_limit_key_secret: str | None = None
+    rate_limit_fail_closed_auth: bool = True
+    rate_limit_fail_closed_account: bool = True
+    rate_limit_fail_closed_kyc: bool = True
+    rate_limit_fail_closed_marketplace: bool = False
+    trusted_proxy_networks: str = ""
     notification_provider: str = "logging"
     notification_public_base_url: str = "http://localhost:8000"
     knock_api_key: str | None = None

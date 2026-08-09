@@ -35,14 +35,17 @@ from app.domain.enums import (
     UserStatus,
 )
 from app.domain.exceptions import IdempotencyConflictError, PreconditionFailedError
+from app.infrastructure.config import settings
 from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.idempotency import IdempotencyReplay, IdempotencyRequest
+from app.infrastructure.rate_limiting import MARKETPLACE_MUTATION, RateLimitService
 from app.infrastructure.security import SecurityService
 from app.integrations.youverify import KycProviderRequest, KycProviderResult
 from app.models import Base
 from app.models.exchange_request import ExchangeRequestModel
 from app.models.idempotency_record import IdempotencyRecordModel
 from app.models.outbox_event import OutboxEventModel
+from app.models.rate_limit_bucket import RateLimitBucketModel
 from app.services.auth import AuthService, hash_auth_token
 from app.services.exchange_request import ExchangeRequestService
 from app.services.kyc import KycService
@@ -457,6 +460,44 @@ async def test_stale_outbox_finalizer_cannot_overwrite_reclaimed_lease(
 
     assert delivered is not None
     assert delivered.status is OutboxEventStatus.DELIVERED
+
+
+async def test_rate_limit_bucket_is_atomic_under_postgres_concurrency(
+    postgres_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent workers cannot allow more requests than the configured limit."""
+    user = await _create_user(postgres_session_factory, f"rate-limit-race-{uuid4()}@example.com")
+    monkeypatch.setattr(
+        settings,
+        "rate_limit_policy_overrides",
+        {f"{MARKETPLACE_MUTATION}.user": {"limit": 3, "window_seconds": 60}},
+    )
+    services = [
+        RateLimitService(uow_factory=lambda: SqlAlchemyUnitOfWork(postgres_session_factory))
+        for _ in range(10)
+    ]
+
+    decisions = await asyncio.gather(
+        *(
+            service.enforce(
+                policy_name=MARKETPLACE_MUTATION,
+                identities={"user": str(user.id)},
+            )
+            for service in services
+        )
+    )
+
+    assert sum(not decision.limited for decision in decisions) == 3
+    assert sum(decision.limited for decision in decisions) == 7
+    async with postgres_session_factory() as session:
+        bucket = await session.scalar(
+            select(RateLimitBucketModel).where(
+                RateLimitBucketModel.policy_name == MARKETPLACE_MUTATION
+            )
+        )
+    assert bucket is not None
+    assert bucket.request_count == 4
 
 
 async def test_email_verification_token_is_single_use_under_concurrency(

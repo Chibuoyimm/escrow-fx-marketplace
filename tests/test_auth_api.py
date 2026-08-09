@@ -19,6 +19,7 @@ from app.domain.auth import AuthenticatedPrincipal
 from app.domain.enums import UserRole, UserStatus
 from app.infrastructure.config import settings
 from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
+from app.infrastructure.rate_limiting import RateLimitService, get_rate_limit_service
 from app.infrastructure.request_context import register_request_context
 from app.infrastructure.security import SecurityService
 from app.main import app
@@ -57,6 +58,9 @@ def build_guard_app(auth_service: AuthService) -> FastAPI:
     register_exception_handlers(application)
     application.include_router(api_router)
     application.dependency_overrides[get_auth_service] = lambda: auth_service
+    application.dependency_overrides[get_rate_limit_service] = lambda: RateLimitService(
+        uow_factory=auth_service._uow_factory
+    )
 
     @application.get(f"{settings.api_v1_prefix}/admin-only")
     async def admin_only(

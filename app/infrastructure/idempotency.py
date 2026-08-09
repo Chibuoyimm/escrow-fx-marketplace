@@ -52,6 +52,28 @@ def build_idempotency_request(
         raise InvariantViolationError(
             "Idempotency-Key must contain 1-128 ASCII letters, digits, '.', '_', '~', or '-'."
         )
+    return IdempotencyRequest(
+        principal_user_id=principal_user_id,
+        operation_scope=operation_scope,
+        key_hash=hash_idempotency_key(key),
+        request_fingerprint=build_idempotency_fingerprint(
+            operation_scope=operation_scope,
+            payload=payload,
+        ),
+    )
+
+
+def hash_idempotency_key(key: str) -> str:
+    """Validate and hash an Idempotency-Key for replay preflight."""
+    if not _KEY_PATTERN.fullmatch(key):
+        raise InvariantViolationError(
+            "Idempotency-Key must contain 1-128 ASCII letters, digits, '.', '_', '~', or '-'."
+        )
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def build_idempotency_fingerprint(*, operation_scope: str, payload: Any) -> str:
+    """Build the canonical fingerprint shared by routes and rate-limit preflight."""
     if not 1 <= len(operation_scope) <= 200:
         raise InvariantViolationError("The idempotency operation scope is invalid.")
 
@@ -61,12 +83,7 @@ def build_idempotency_request(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    return IdempotencyRequest(
-        principal_user_id=principal_user_id,
-        operation_scope=operation_scope,
-        key_hash=hashlib.sha256(key.encode("utf-8")).hexdigest(),
-        request_fingerprint=hashlib.sha256(fingerprint_input).hexdigest(),
-    )
+    return hashlib.sha256(fingerprint_input).hexdigest()
 
 
 def serialize_idempotency_response(value: Any) -> dict[str, Any]:

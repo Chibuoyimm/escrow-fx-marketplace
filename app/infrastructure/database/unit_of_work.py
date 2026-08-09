@@ -18,6 +18,7 @@ from app.repositories.protocols import (
     KycVerificationRepositoryProtocol,
     OutboxEventRepositoryProtocol,
     PasswordResetTokenRepositoryProtocol,
+    RateLimitRepositoryProtocol,
     TradeContractRepositoryProtocol,
     UserRepositoryProtocol,
 )
@@ -33,6 +34,7 @@ from app.repositories.sqlalchemy import (
     SqlAlchemyKycVerificationRepository,
     SqlAlchemyOutboxEventRepository,
     SqlAlchemyPasswordResetTokenRepository,
+    SqlAlchemyRateLimitRepository,
     SqlAlchemyTradeContractRepository,
     SqlAlchemyUserRepository,
 )
@@ -47,6 +49,7 @@ class AbstractUnitOfWork(ABC):
     password_reset_tokens: PasswordResetTokenRepositoryProtocol
     kyc_verifications: KycVerificationRepositoryProtocol
     idempotency_records: IdempotencyRecordRepositoryProtocol
+    rate_limits: RateLimitRepositoryProtocol
     currencies: CurrencyRepositoryProtocol
     corridors: CorridorRepositoryProtocol
     corridor_rails: CorridorRailRepositoryProtocol
@@ -87,6 +90,7 @@ class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
         self.password_reset_tokens = SqlAlchemyPasswordResetTokenRepository(self.session)
         self.kyc_verifications = SqlAlchemyKycVerificationRepository(self.session)
         self.idempotency_records = SqlAlchemyIdempotencyRecordRepository(self.session)
+        self.rate_limits = SqlAlchemyRateLimitRepository(self.session)
         self.currencies = SqlAlchemyCurrencyRepository(self.session)
         self.corridors = SqlAlchemyCorridorRepository(self.session)
         self.corridor_rails = SqlAlchemyCorridorRailRepository(self.session)

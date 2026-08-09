@@ -18,8 +18,10 @@ from app.domain.enums import (
     UserStatus,
 )
 from app.domain.exceptions import InvariantViolationError
+from app.infrastructure.config import settings
 from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.idempotency import build_idempotency_request
+from app.infrastructure.rate_limiting import MARKETPLACE_MUTATION
 from app.infrastructure.security import SecurityService
 from app.main import app
 from app.models.exchange_offer import ExchangeOfferModel
@@ -207,6 +209,46 @@ async def test_create_request_replays_and_rejects_payload_reuse(
         assert await session.scalar(select(func.count()).select_from(IdempotencyRecordModel)) == 1
 
 
+async def test_exact_completed_create_replay_bypasses_an_exhausted_quota_but_changed_payload_does_not(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        usd = await uow.currencies.add(build_currency(code="USD"))
+        ngn = await uow.currencies.add(build_currency(code="NGN"))
+        await uow.corridors.add(build_corridor(from_currency_id=usd.id, to_currency_id=ngn.id))
+        await uow.commit()
+    _, headers = await create_user_and_token(
+        session_factory, auth_service, email="rate-limit-idempotency-create@example.com"
+    )
+    headers = {**headers, "Idempotency-Key": "rate-limit-create-1"}
+    monkeypatch.setattr(
+        settings,
+        "rate_limit_policy_overrides",
+        {f"{MARKETPLACE_MUTATION}.user": {"limit": 1, "window_seconds": 60}},
+    )
+
+    first = await client.post("/api/v1/exchange-requests", headers=headers, json=request_payload())
+    replay = await client.post(
+        "/api/v1/exchange-requests",
+        headers=headers,
+        json=request_payload(preferred_rate="1500.0"),
+    )
+    changed = await client.post(
+        "/api/v1/exchange-requests",
+        headers=headers,
+        json=request_payload(preferred_rate="1510"),
+    )
+
+    assert first.status_code == 201
+    assert replay.status_code == 201
+    assert replay.json() == first.json()
+    assert changed.status_code == 429
+    assert changed.json()["error_code"] == "rate_limited"
+
+
 async def test_authentication_and_schema_failures_do_not_reserve_keys(
     client: AsyncClient,
     auth_service: AuthService,
@@ -326,7 +368,13 @@ async def test_relist_replays_without_creating_a_second_successor(
     client: AsyncClient,
     auth_service: AuthService,
     session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        settings,
+        "rate_limit_policy_overrides",
+        {f"{MARKETPLACE_MUTATION}.user": {"limit": 1, "window_seconds": 60}},
+    )
     omitted_seed = await seed_request(
         session_factory,
         request_status=ExchangeRequestStatus.CANCELLED,
@@ -388,8 +436,8 @@ async def test_relist_replays_without_creating_a_second_successor(
     assert explicit_null_first.json() == explicit_null_replay.json()
     assert explicit_null_first.json()["min_rate"] is None
     assert conflict_first.status_code == 201
-    assert conflict_response.status_code == 409
-    assert conflict_response.json()["error_code"] == "conflict"
+    assert conflict_response.status_code == 429
+    assert conflict_response.json()["error_code"] == "rate_limited"
     async with session_factory() as session:
         assert await session.scalar(select(func.count()).select_from(ExchangeRequestModel)) == 6
         assert await session.scalar(select(func.count()).select_from(OutboxEventModel)) == 3
@@ -425,11 +473,118 @@ async def test_offer_creation_replays_without_duplicate_offer_or_event(
         assert await session.scalar(select(func.count()).select_from(OutboxEventModel)) == 2
 
 
+async def test_exact_completed_offer_replay_bypasses_an_exhausted_quota(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seeded = await seed_request(session_factory)
+    _, headers = await create_user_and_token(
+        session_factory, auth_service, email="rate-limit-idempotency-offer@example.com"
+    )
+    headers["Idempotency-Key"] = "rate-limit-offer-1"
+    monkeypatch.setattr(
+        settings,
+        "rate_limit_policy_overrides",
+        {f"{MARKETPLACE_MUTATION}.user": {"limit": 1, "window_seconds": 60}},
+    )
+    path = f"/api/v1/exchange-requests/{seeded['request_id']}/offers"
+
+    first = await client.post(path, headers=headers, json={"offered_rate": "1490"})
+    replay = await client.post(path, headers=headers, json={"offered_rate": "1490.0"})
+
+    assert first.status_code == 201
+    assert replay.status_code == 201
+    assert replay.json() == first.json()
+
+
+async def test_malformed_idempotency_key_still_consumes_marketplace_capacity(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        usd = await uow.currencies.add(build_currency(code="USD"))
+        ngn = await uow.currencies.add(build_currency(code="NGN"))
+        await uow.corridors.add(build_corridor(from_currency_id=usd.id, to_currency_id=ngn.id))
+        await uow.commit()
+    _, headers = await create_user_and_token(
+        session_factory, auth_service, email="rate-limit-malformed-key@example.com"
+    )
+    monkeypatch.setattr(
+        settings,
+        "rate_limit_policy_overrides",
+        {f"{MARKETPLACE_MUTATION}.user": {"limit": 1, "window_seconds": 60}},
+    )
+
+    malformed = await client.post(
+        "/api/v1/exchange-requests",
+        headers={**headers, "Idempotency-Key": "malformed key"},
+        json=request_payload(),
+    )
+    blocked = await client.post(
+        "/api/v1/exchange-requests",
+        headers={**headers, "Idempotency-Key": "valid-key-after-malformed"},
+        json=request_payload(),
+    )
+
+    assert malformed.status_code == 422
+    assert malformed.json()["error_code"] == "invariant_violation"
+    assert blocked.status_code == 429
+    assert blocked.json()["error_code"] == "rate_limited"
+
+
+async def test_invalid_idempotency_preflight_body_still_consumes_marketplace_capacity(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        usd = await uow.currencies.add(build_currency(code="USD"))
+        ngn = await uow.currencies.add(build_currency(code="NGN"))
+        await uow.corridors.add(build_corridor(from_currency_id=usd.id, to_currency_id=ngn.id))
+        await uow.commit()
+    _, headers = await create_user_and_token(
+        session_factory, auth_service, email="rate-limit-invalid-body@example.com"
+    )
+    headers = {**headers, "Idempotency-Key": "invalid-body-key"}
+    monkeypatch.setattr(
+        settings,
+        "rate_limit_policy_overrides",
+        {f"{MARKETPLACE_MUTATION}.user": {"limit": 1, "window_seconds": 60}},
+    )
+
+    invalid = await client.post(
+        "/api/v1/exchange-requests",
+        headers=headers,
+        json={"from_currency_code": "USD"},
+    )
+    blocked = await client.post(
+        "/api/v1/exchange-requests",
+        headers=headers,
+        json=request_payload(),
+    )
+
+    assert invalid.status_code == 422
+    assert invalid.json()["error_code"] == "validation_error"
+    assert blocked.status_code == 429
+    assert blocked.json()["error_code"] == "rate_limited"
+
+
 async def test_cancel_withdraw_reject_and_accept_are_replayable(
     client: AsyncClient,
     auth_service: AuthService,
     session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        settings,
+        "rate_limit_policy_overrides",
+        {f"{MARKETPLACE_MUTATION}.user": {"limit": 1, "window_seconds": 60}},
+    )
     cancel_seed = await seed_request(session_factory)
     async with SqlAlchemyUnitOfWork(session_factory) as uow:
         cancel_owner = await uow.users.get(cancel_seed["creator_id"])

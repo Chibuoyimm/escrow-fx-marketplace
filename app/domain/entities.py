@@ -317,3 +317,14 @@ class IdempotencyRecord:
     updated_at: datetime
     expires_at: datetime
     completed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class RateLimitBucket:
+    """A persistent fixed-window request counter."""
+
+    policy_name: str
+    key_hash: str
+    window_started_at: datetime
+    request_count: int
+    expires_at: datetime

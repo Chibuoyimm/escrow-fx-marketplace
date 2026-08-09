@@ -11,9 +11,11 @@ from starlette.responses import Response
 
 from app.api.dependencies import get_current_principal
 from app.api.idempotency import replay_response
+from app.api.rate_limiting import authenticated_rate_limit_dependency
 from app.domain.auth import AuthenticatedPrincipal
 from app.domain.enums import ExchangeOfferStatus
 from app.infrastructure.idempotency import IdempotencyReplay, build_idempotency_request
+from app.infrastructure.rate_limiting import MARKETPLACE_MUTATION
 from app.schemas.exchange_offer import ExchangeOfferResponse, UpdateExchangeOfferRequest
 from app.schemas.pagination import CursorPage
 from app.schemas.trade import TradeContractResponse
@@ -33,7 +35,18 @@ created_from_query = Query(default=None)
 created_to_query = Query(default=None)
 
 
-@offer_router.post("/{offer_id}/withdraw", response_model=ExchangeOfferResponse)
+@offer_router.post(
+    "/{offer_id}/withdraw",
+    response_model=ExchangeOfferResponse,
+    dependencies=[
+        Depends(
+            authenticated_rate_limit_dependency(
+                MARKETPLACE_MUTATION,
+                idempotency_scope_template="exchange-offer.withdraw:{offer_id}",
+            )
+        )
+    ],
+)
 async def withdraw_exchange_offer(
     offer_id: UUID,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -57,7 +70,11 @@ async def withdraw_exchange_offer(
     return ExchangeOfferResponse.model_validate(exchange_offer)
 
 
-@offer_router.patch("/{offer_id}", response_model=ExchangeOfferResponse)
+@offer_router.patch(
+    "/{offer_id}",
+    response_model=ExchangeOfferResponse,
+    dependencies=[Depends(authenticated_rate_limit_dependency(MARKETPLACE_MUTATION))],
+)
 async def update_exchange_offer(
     offer_id: UUID,
     payload: UpdateExchangeOfferRequest,
@@ -116,7 +133,18 @@ async def get_exchange_offer(
     return ExchangeOfferResponse.model_validate(offer)
 
 
-@offer_router.post("/{offer_id}/reject", response_model=ExchangeOfferResponse)
+@offer_router.post(
+    "/{offer_id}/reject",
+    response_model=ExchangeOfferResponse,
+    dependencies=[
+        Depends(
+            authenticated_rate_limit_dependency(
+                MARKETPLACE_MUTATION,
+                idempotency_scope_template="exchange-offer.reject:{offer_id}",
+            )
+        )
+    ],
+)
 async def reject_exchange_offer(
     offer_id: UUID,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -140,7 +168,18 @@ async def reject_exchange_offer(
     return ExchangeOfferResponse.model_validate(exchange_offer)
 
 
-@offer_router.post("/{offer_id}/accept", response_model=TradeContractResponse)
+@offer_router.post(
+    "/{offer_id}/accept",
+    response_model=TradeContractResponse,
+    dependencies=[
+        Depends(
+            authenticated_rate_limit_dependency(
+                MARKETPLACE_MUTATION,
+                idempotency_scope_template="exchange-offer.accept:{offer_id}",
+            )
+        )
+    ],
+)
 async def accept_exchange_offer(
     offer_id: UUID,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),

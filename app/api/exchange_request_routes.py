@@ -11,9 +11,11 @@ from starlette.responses import Response
 
 from app.api.dependencies import get_current_principal
 from app.api.idempotency import replay_response
+from app.api.rate_limiting import authenticated_rate_limit_dependency
 from app.domain.auth import AuthenticatedPrincipal
 from app.domain.enums import ExchangeRequestStatus
 from app.infrastructure.idempotency import IdempotencyReplay, build_idempotency_request
+from app.infrastructure.rate_limiting import MARKETPLACE_MUTATION
 from app.schemas.exchange_offer import CreateExchangeOfferRequest, ExchangeOfferResponse
 from app.schemas.exchange_request import (
     CreateExchangeRequestRequest,
@@ -46,6 +48,15 @@ created_to_query = Query(default=None)
     "",
     response_model=ExchangeRequestResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[
+        Depends(
+            authenticated_rate_limit_dependency(
+                MARKETPLACE_MUTATION,
+                idempotency_scope_template="exchange-request.create",
+                idempotency_payload_model=CreateExchangeRequestRequest,
+            )
+        )
+    ],
 )
 async def create_exchange_request(
     payload: CreateExchangeRequestRequest,
@@ -136,7 +147,11 @@ async def list_my_exchange_requests(
     )
 
 
-@exchange_request_router.patch("/{request_id}", response_model=ExchangeRequestResponse)
+@exchange_request_router.patch(
+    "/{request_id}",
+    response_model=ExchangeRequestResponse,
+    dependencies=[Depends(authenticated_rate_limit_dependency(MARKETPLACE_MUTATION))],
+)
 async def update_exchange_request(
     request_id: UUID,
     payload: UpdateExchangeRequestRequest,
@@ -155,7 +170,18 @@ async def update_exchange_request(
     return ExchangeRequestResponse.model_validate(exchange_request)
 
 
-@exchange_request_router.post("/{request_id}/cancel", response_model=ExchangeRequestResponse)
+@exchange_request_router.post(
+    "/{request_id}/cancel",
+    response_model=ExchangeRequestResponse,
+    dependencies=[
+        Depends(
+            authenticated_rate_limit_dependency(
+                MARKETPLACE_MUTATION,
+                idempotency_scope_template="exchange-request.cancel:{request_id}",
+            )
+        )
+    ],
+)
 async def cancel_exchange_request(
     request_id: UUID,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -183,6 +209,17 @@ async def cancel_exchange_request(
     "/{request_id}/relist",
     response_model=ExchangeRequestResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[
+        Depends(
+            authenticated_rate_limit_dependency(
+                MARKETPLACE_MUTATION,
+                idempotency_scope_template="exchange-request.relist:{request_id}",
+                idempotency_payload_model=RelistExchangeRequestRequest,
+                idempotency_payload_exclude_unset=True,
+                idempotency_payload_optional=True,
+            )
+        )
+    ],
 )
 async def relist_exchange_request(
     request_id: UUID,
@@ -217,6 +254,15 @@ async def relist_exchange_request(
     "/{request_id}/offers",
     response_model=ExchangeOfferResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[
+        Depends(
+            authenticated_rate_limit_dependency(
+                MARKETPLACE_MUTATION,
+                idempotency_scope_template="exchange-offer.create:{request_id}",
+                idempotency_payload_model=CreateExchangeOfferRequest,
+            )
+        )
+    ],
 )
 async def create_exchange_offer(
     request_id: UUID,

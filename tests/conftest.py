@@ -36,6 +36,7 @@ from app.domain.enums import (
     UserRole,
     UserStatus,
 )
+from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 from app.models import Base
 
 
@@ -90,6 +91,31 @@ def mutation_lock_calls(
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def rate_limit_service_override(
+    request: pytest.FixtureRequest,
+) -> Any:
+    """Keep API rate-limit tests isolated in each test database."""
+    if "client" not in request.fixturenames:
+        yield
+        return
+    session_factory = request.getfixturevalue("session_factory")
+    from app.infrastructure.rate_limiting import RateLimitService, get_rate_limit_service
+    from app.main import app
+
+    previous = app.dependency_overrides.get(get_rate_limit_service)
+    app.dependency_overrides[get_rate_limit_service] = lambda: RateLimitService(
+        uow_factory=lambda: SqlAlchemyUnitOfWork(session_factory)
+    )
+    try:
+        yield
+    finally:
+        if previous is None:
+            app.dependency_overrides.pop(get_rate_limit_service, None)
+        else:
+            app.dependency_overrides[get_rate_limit_service] = previous
 
 
 @pytest.fixture

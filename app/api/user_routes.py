@@ -3,8 +3,10 @@
 from fastapi import APIRouter, Depends
 
 from app.api.dependencies import get_current_principal
+from app.api.rate_limiting import authenticated_rate_limit_dependency
 from app.domain.auth import AuthenticatedPrincipal
 from app.domain.exceptions import InvariantViolationError
+from app.infrastructure.rate_limiting import ACCOUNT_DEACTIVATE, ACCOUNT_MUTATION
 from app.schemas.auth import CurrentUserResponse
 from app.schemas.notification_preferences import (
     NotificationPreferencesPatch,
@@ -35,7 +37,11 @@ async def get_current_user(
     return CurrentUserResponse.model_validate(user)
 
 
-@users_router.patch("/me", response_model=CurrentUserResponse)
+@users_router.patch(
+    "/me",
+    response_model=CurrentUserResponse,
+    dependencies=[Depends(authenticated_rate_limit_dependency(ACCOUNT_MUTATION))],
+)
 async def update_current_user(
     payload: UpdateProfileRequest,
     principal: AuthenticatedPrincipal = current_principal_dependency,
@@ -48,7 +54,11 @@ async def update_current_user(
     return CurrentUserResponse.model_validate(user)
 
 
-@users_router.post("/me/deactivate", response_model=CurrentUserResponse)
+@users_router.post(
+    "/me/deactivate",
+    response_model=CurrentUserResponse,
+    dependencies=[Depends(authenticated_rate_limit_dependency(ACCOUNT_DEACTIVATE))],
+)
 async def deactivate_current_user(
     payload: DeactivateAccountRequest,
     principal: AuthenticatedPrincipal = current_principal_dependency,
@@ -77,6 +87,7 @@ async def get_notification_preferences(
 @users_router.patch(
     "/me/notification-preferences",
     response_model=NotificationPreferencesResponse,
+    dependencies=[Depends(authenticated_rate_limit_dependency(ACCOUNT_MUTATION))],
 )
 async def update_notification_preferences(
     payload: NotificationPreferencesPatch,

@@ -17,6 +17,7 @@ class ErrorCode:
     INVARIANT_VIOLATION = "invariant_violation"
     INFRASTRUCTURE_FAILURE = "infrastructure_failure"
     INTERNAL_ERROR = "internal_error"
+    RATE_LIMITED = "rate_limited"
 
 
 @dataclass(slots=True)
@@ -118,4 +119,17 @@ class InvariantViolationError(AppError):
             detail=detail,
             error_code=ErrorCode.INVARIANT_VIOLATION,
             status_code=422,
+        )
+
+
+class RateLimitExceededError(AppError):
+    """Raised when a configured request limit has been exhausted."""
+
+    def __init__(self, *, retry_after: int, headers: dict[str, str]) -> None:
+        super().__init__(
+            title="Too Many Requests",
+            detail="Too many requests. Please retry later.",
+            error_code=ErrorCode.RATE_LIMITED,
+            status_code=429,
+            headers={"Retry-After": str(retry_after), **headers},
         )

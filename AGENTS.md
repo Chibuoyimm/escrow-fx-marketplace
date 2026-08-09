@@ -214,6 +214,44 @@ Nigeria KYC has a provider-ready backend foundation.
   milestone. They either already have idempotent assignment semantics or need
   separate token/security replay contracts.
 
+## API Rate-Limiting Decisions
+
+- High-risk auth/account endpoints, KYC submission, authenticated marketplace
+  mutations, and admin state/review mutations use named policies from
+  `app/infrastructure/rate_limiting.py`. Health checks and ordinary reads are
+  intentionally not rate limited.
+- Counters are durable PostgreSQL rows in `rate_limit_buckets`. The repository
+  uses dialect-native `INSERT ... ON CONFLICT` upserts and caps overflow at
+  `limit + 1`, so concurrent API instances cannot allow more than the policy
+  limit and counters do not grow without bound.
+- Policy keys are HMAC-SHA256 values of transient policy/dimension/identity
+  data, keyed by `APP_RATE_LIMIT_KEY_SECRET` or the development fallback
+  `APP_JWT_SECRET_KEY`. Production should set a distinct strong rate-limit
+  secret. Never persist raw emails, tokens, authorization headers, passwords, KYC
+  identifiers, or other secrets in limiter keys. Public auth uses normalized
+  account identifiers plus client IP where available; authenticated actions
+  use the current user ID.
+- The direct peer address is trusted by default. Only explicitly configured
+  IPs/CIDRs in `APP_TRUSTED_PROXY_NETWORKS` may supply a meaningful
+  `X-Forwarded-For` chain. Do not add blind forwarding-header trust.
+- Auth/account/KYC/admin limiter storage failures fail closed with a sanitized
+  `503`; marketplace limiter storage failures fail open by default to favor
+  availability. Change this only deliberately through the category settings.
+- `429` responses use Problem Details with error code `rate_limited`, a
+  correct `Retry-After`, and `RateLimit-*` headers. Failed authentication and
+  malformed auth requests consume their applicable public limits.
+- Completed idempotency replays are checked before consuming marketplace
+  capacity only when the authenticated user, operation/resource scope, key hash,
+  and exact canonical request fingerprint all match. A changed payload remains
+  rate limited and then follows normal idempotency conflict handling; a new key
+  remains rate limited.
+- KYC's limiter is additional abuse protection and must not replace the
+  existing one-minute cooldown and rolling attempt-window business rules.
+- Run `make cleanup-rate-limits` from a scheduler to delete expired counters in
+  bounded batches. Configure limits/windows with
+  `APP_RATE_LIMIT_POLICY_OVERRIDES`; disable the feature only for controlled
+  local/test environments with `APP_RATE_LIMIT_ENABLED`.
+
 ## Notification And Outbox Decisions
 
 The app uses a database outbox pattern.

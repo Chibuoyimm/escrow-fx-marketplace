@@ -51,6 +51,7 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     idempotency_columns = {
         column["name"] for column in inspector.get_columns("idempotency_records")
     }
+    rate_limit_columns = {column["name"] for column in inspector.get_columns("rate_limit_buckets")}
     audit_event_column = next(
         column
         for column in inspector.get_columns("account_audit_events")
@@ -70,6 +71,7 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     assert "password_reset_tokens" in inspector.get_table_names()
     assert "kyc_verifications" in inspector.get_table_names()
     assert "idempotency_records" in inspector.get_table_names()
+    assert "rate_limit_buckets" in inspector.get_table_names()
     assert "password_hash" in user_columns
     assert "email_verified_at" in user_columns
     assert "token_hash" in email_verification_token_columns
@@ -102,6 +104,15 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
         "expires_at",
         "completed_at",
     } <= idempotency_columns
+    assert {
+        "policy_name",
+        "key_hash",
+        "window_started_at",
+        "request_count",
+        "expires_at",
+        "created_at",
+        "updated_at",
+    } <= rate_limit_columns
     assert getattr(audit_event_column["type"], "length", None) == 64
     assert getattr(AccountAuditEventModel.__table__.c.event_type.type, "length", None) == 64
     assert {
@@ -132,6 +143,13 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     assert "ix_idempotency_records_expires_at" in {
         index["name"] for index in inspector.get_indexes("idempotency_records")
     }
+    rate_limit_unique_constraints = {
+        constraint["name"] for constraint in inspector.get_unique_constraints("rate_limit_buckets")
+    }
+    assert "uq_rate_limit_buckets_policy_key" in rate_limit_unique_constraints
+    assert "ix_rate_limit_buckets_expires_at" in {
+        index["name"] for index in inspector.get_indexes("rate_limit_buckets")
+    }
 
     migration_text = Path(
         "alembic/versions/20260726_0011_add_request_lineage_and_marketplace_indexes.py"
@@ -155,6 +173,7 @@ def test_alembic_upgrades_empty_database_to_head(tmp_path: Path) -> None:
     assert "relisted_from_request_id" not in downgraded_columns
     assert "account_audit_events" not in downgraded_inspector.get_table_names()
     assert "idempotency_records" not in downgraded_inspector.get_table_names()
+    assert "rate_limit_buckets" not in downgraded_inspector.get_table_names()
     assert "ix_exchange_requests_creator_created_id" not in {
         index["name"] for index in downgraded_inspector.get_indexes("exchange_requests")
     }

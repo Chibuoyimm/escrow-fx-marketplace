@@ -8,6 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 
 from app.api.dependencies import get_current_principal, require_roles
+from app.api.rate_limiting import authenticated_rate_limit_dependency
 from app.domain.auth import AuthenticatedPrincipal
 from app.domain.enums import (
     ExchangeOfferStatus,
@@ -18,6 +19,7 @@ from app.domain.enums import (
     UserRole,
     UserStatus,
 )
+from app.infrastructure.rate_limiting import ADMIN_MUTATION
 from app.schemas.auth import CurrentUserResponse
 from app.schemas.exchange_offer import ExchangeOfferResponse
 from app.schemas.exchange_request import ExchangeRequestResponse
@@ -78,7 +80,10 @@ async def list_users(
 @admin_router.patch(
     "/users/{user_id}/status",
     response_model=CurrentUserResponse,
-    dependencies=[admin_management_dependency],
+    dependencies=[
+        admin_management_dependency,
+        Depends(authenticated_rate_limit_dependency(ADMIN_MUTATION)),
+    ],
 )
 async def update_user_status(
     user_id: UUID,
@@ -217,7 +222,11 @@ async def get_kyc_verification(
     return KycVerificationResponse.model_validate(verification)
 
 
-@admin_router.post("/kyc/{verification_id}/approve", response_model=KycVerificationResponse)
+@admin_router.post(
+    "/kyc/{verification_id}/approve",
+    response_model=KycVerificationResponse,
+    dependencies=[Depends(authenticated_rate_limit_dependency(ADMIN_MUTATION))],
+)
 async def approve_kyc_review(
     verification_id: UUID,
     principal: AuthenticatedPrincipal = principal_dependency,
@@ -231,7 +240,11 @@ async def approve_kyc_review(
     return KycVerificationResponse.model_validate(verification)
 
 
-@admin_router.post("/kyc/{verification_id}/notes", response_model=KycVerificationResponse)
+@admin_router.post(
+    "/kyc/{verification_id}/notes",
+    response_model=KycVerificationResponse,
+    dependencies=[Depends(authenticated_rate_limit_dependency(ADMIN_MUTATION))],
+)
 async def add_kyc_review_note(
     verification_id: UUID,
     payload: AdminKycReviewNoteRequest,
@@ -247,7 +260,11 @@ async def add_kyc_review_note(
     return KycVerificationResponse.model_validate(verification)
 
 
-@admin_router.post("/kyc/{verification_id}/reject", response_model=KycVerificationResponse)
+@admin_router.post(
+    "/kyc/{verification_id}/reject",
+    response_model=KycVerificationResponse,
+    dependencies=[Depends(authenticated_rate_limit_dependency(ADMIN_MUTATION))],
+)
 async def reject_kyc_review(
     verification_id: UUID,
     payload: AdminKycRejectRequest,

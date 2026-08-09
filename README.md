@@ -290,6 +290,81 @@ Configure retention, abandoned-claim timeout, and cleanup batch size with
 `APP_IDEMPOTENCY_CLEANUP_BATCH_SIZE`. Do not send passwords, authorization
 headers, raw KYC data, or secrets in idempotency payloads.
 
+## API Rate Limiting
+
+High-risk endpoints use a PostgreSQL-backed fixed-window limiter. Counters are
+stored in `rate_limit_buckets`, and each bucket key is an HMAC-SHA256 value of
+the policy, dimension, and identity. No raw email, token, authorization header,
+KYC identifier, or password is stored. PostgreSQL `INSERT ... ON CONFLICT`
+upserts make consumption atomic across API instances.
+
+The limiter does not apply to health checks or ordinary read endpoints. Its
+defaults are abuse-protection limits, not business rules such as one request
+per currency pair per day:
+
+| Policy | Dimensions and default limit |
+| --- | --- |
+| `auth.register` | IP: 5/15 minutes; normalized email: 3/hour |
+| `auth.login` | IP: 30/15 minutes; normalized email: 10/15 minutes |
+| `auth.resend-verification` | IP: 10/hour; normalized email: 3/hour |
+| `auth.forgot-password` | IP: 10/hour; normalized email: 3/hour |
+| `auth.verify-email` | IP: 20/15 minutes; token hash: 5/15 minutes |
+| `auth.reset-password` | IP: 10/15 minutes; token hash: 5/15 minutes |
+| `auth.change-password` | User: 5/hour |
+| `account.mutation` | User: 20/15 minutes |
+| `account.deactivate` | User: 3/hour |
+| `kyc.submit` | User: 5/hour, in addition to KYC business cooldown/attempt rules |
+| `marketplace.mutation` | User: 30/minute across marketplace mutations |
+| `admin.mutation` | Admin user: 60/minute |
+
+Successful and rejected requests expose `RateLimit-Limit`,
+`RateLimit-Remaining`, `RateLimit-Reset`, and `RateLimit-Policy` headers. An
+exhausted policy returns RFC Problem Details with HTTP `429`, stable error code
+`rate_limited`, and a correct `Retry-After` value. Failed authentication and
+malformed auth requests consume their applicable IP/account capacity.
+
+Authenticated marketplace requests check for an already completed idempotency
+replay before consuming user capacity. A retry returns its original response
+even if the user has exhausted the current marketplace window only when the
+authenticated user, operation/resource scope, key hash, and exact canonical
+request fingerprint all match. A changed payload remains subject to the limit
+and then follows normal idempotency conflict handling; a new key is also subject
+to the limit.
+
+The default storage failure policy is fail-closed for auth, account, KYC, and
+admin policies, and fail-open for marketplace mutations. Fail-closed failures
+return a sanitized `503` Problem Details response; no database error is exposed.
+The marketplace choice prioritizes availability, while its normal business
+transaction still remains responsible for database availability.
+
+By default, the limiter uses the direct peer address and ignores
+`X-Forwarded-For`. When the API is behind a trusted reverse proxy, configure
+the exact proxy IPs or CIDRs with `APP_TRUSTED_PROXY_NETWORKS`; never enable
+blind forwarding-header trust. Policy limits can be overridden with JSON, for
+example:
+
+```dotenv
+APP_RATE_LIMIT_POLICY_OVERRIDES='{"auth.login.ip":{"limit":20,"window_seconds":300}}'
+```
+
+Rate-limit keys use HMAC-SHA256. Set `APP_RATE_LIMIT_KEY_SECRET` to a distinct,
+strong production secret; when it is empty in development or tests, the limiter
+falls back to `APP_JWT_SECRET_KEY`. Rotating this secret resets existing rate
+limit buckets, which is safe but permits a fresh window.
+
+For idempotent marketplace mutations, the limiter bypasses capacity only when
+the completed record matches the authenticated user, operation/resource scope,
+key hash, and the exact canonical request fingerprint. A reused key with a
+different payload still consumes capacity and reaches the normal idempotency
+conflict handling when it is not rate limited.
+
+Set `APP_RATE_LIMIT_ENABLED="false"` only for controlled local/test
+environments. Expired counters are removed in bounded batches by scheduling:
+
+```bash
+make cleanup-rate-limits
+```
+
 The expiry command updates stale marketplace state and records outbox events for
 affected users. It also records a summary `marketplace_expiry.completed` event
 for operational inspection.

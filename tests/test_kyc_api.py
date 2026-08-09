@@ -17,6 +17,7 @@ from app.domain.entities import KycVerification
 from app.domain.enums import KycIdType, KycProvider, KycStatus, KycVerificationStatus
 from app.infrastructure.config import settings
 from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
+from app.infrastructure.rate_limiting import KYC_SUBMIT
 from app.infrastructure.security import SecurityService
 from app.integrations.youverify import KycProviderRequest, KycProviderResult, LocalKycProvider
 from app.main import app
@@ -617,6 +618,49 @@ async def test_submit_kyc_enforces_attempt_limit_within_window(
 
     assert response.status_code == 412
     assert response.json()["error_code"] == "precondition_failed"
+
+
+async def test_submit_kyc_rate_limit_is_additional_to_business_guards(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    security: SecurityService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await create_pending_kyc_user(
+        session_factory,
+        security,
+        email="rate-limited-kyc@example.com",
+    )
+    monkeypatch.setattr(
+        settings,
+        "rate_limit_policy_overrides",
+        {f"{KYC_SUBMIT}.user": {"limit": 1, "window_seconds": 60}},
+    )
+    token = await login(client, email="rate-limited-kyc@example.com")
+    payload = {
+        "id_type": "bvn",
+        "id_number": "22222222221",
+        "first_name": "Chibuoyim",
+        "last_name": "Onuigwe",
+        "date_of_birth": "1997-05-16",
+        "subject_consent": True,
+    }
+
+    first = await client.post(
+        "/api/v1/kyc/submit",
+        headers={"Authorization": f"Bearer {token}"},
+        json=payload,
+    )
+    second = await client.post(
+        "/api/v1/kyc/submit",
+        headers={"Authorization": f"Bearer {token}"},
+        json=payload,
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 429
+    assert second.json()["error_code"] == "rate_limited"
+    assert second.headers["retry-after"].isdigit()
 
 
 async def test_reconcile_pending_kyc_updates_final_status(

@@ -3,7 +3,20 @@
 from fastapi import APIRouter, Depends, status
 
 from app.api.dependencies import get_current_principal
+from app.api.rate_limiting import (
+    authenticated_rate_limit_dependency,
+    public_rate_limit_dependency,
+)
 from app.domain.auth import AuthenticatedPrincipal
+from app.infrastructure.rate_limiting import (
+    AUTH_CHANGE_PASSWORD,
+    AUTH_FORGOT_PASSWORD,
+    AUTH_LOGIN,
+    AUTH_REGISTER,
+    AUTH_RESEND_VERIFICATION,
+    AUTH_RESET_PASSWORD,
+    AUTH_VERIFY_EMAIL,
+)
 from app.schemas.auth import (
     AccessTokenResponse,
     ChangePasswordRequest,
@@ -29,6 +42,7 @@ current_principal_dependency = Depends(get_current_principal)
     "/register",
     response_model=RegisterUserResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(public_rate_limit_dependency(AUTH_REGISTER, identifier_field="email"))],
 )
 async def register_user(
     payload: RegisterUserRequest,
@@ -44,7 +58,11 @@ async def register_user(
     return RegisterUserResponse.model_validate(user)
 
 
-@auth_router.post("/login", response_model=AccessTokenResponse)
+@auth_router.post(
+    "/login",
+    response_model=AccessTokenResponse,
+    dependencies=[Depends(public_rate_limit_dependency(AUTH_LOGIN, identifier_field="email"))],
+)
 async def login_user(
     payload: LoginRequest,
     auth_service: AuthService = auth_service_dependency,
@@ -53,7 +71,13 @@ async def login_user(
     return await auth_service.login_user(email=str(payload.email), password=payload.password)
 
 
-@auth_router.post("/verify-email", response_model=EmailVerificationResponse)
+@auth_router.post(
+    "/verify-email",
+    response_model=EmailVerificationResponse,
+    dependencies=[
+        Depends(public_rate_limit_dependency(AUTH_VERIFY_EMAIL, identifier_field="token"))
+    ],
+)
 async def verify_email(
     payload: VerifyEmailRequest,
     auth_service: AuthService = auth_service_dependency,
@@ -73,6 +97,9 @@ async def verify_email(
     "/resend-verification",
     response_model=MessageResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[
+        Depends(public_rate_limit_dependency(AUTH_RESEND_VERIFICATION, identifier_field="email"))
+    ],
 )
 async def resend_email_verification(
     payload: ResendEmailVerificationRequest,
@@ -87,6 +114,9 @@ async def resend_email_verification(
     "/forgot-password",
     response_model=MessageResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[
+        Depends(public_rate_limit_dependency(AUTH_FORGOT_PASSWORD, identifier_field="email"))
+    ],
 )
 async def forgot_password(
     payload: ForgotPasswordRequest,
@@ -99,7 +129,13 @@ async def forgot_password(
     )
 
 
-@auth_router.post("/reset-password", response_model=MessageResponse)
+@auth_router.post(
+    "/reset-password",
+    response_model=MessageResponse,
+    dependencies=[
+        Depends(public_rate_limit_dependency(AUTH_RESET_PASSWORD, identifier_field="token"))
+    ],
+)
 async def reset_password(
     payload: ResetPasswordRequest,
     auth_service: AuthService = auth_service_dependency,
@@ -109,7 +145,11 @@ async def reset_password(
     return MessageResponse(message="Your password has been reset.")
 
 
-@auth_router.post("/change-password", response_model=MessageResponse)
+@auth_router.post(
+    "/change-password",
+    response_model=MessageResponse,
+    dependencies=[Depends(authenticated_rate_limit_dependency(AUTH_CHANGE_PASSWORD))],
+)
 async def change_password(
     payload: ChangePasswordRequest,
     principal: AuthenticatedPrincipal = current_principal_dependency,

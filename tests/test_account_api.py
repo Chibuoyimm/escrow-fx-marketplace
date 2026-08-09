@@ -21,7 +21,9 @@ from app.domain.enums import (
     UserStatus,
 )
 from app.domain.exceptions import AuthorizationError
+from app.infrastructure.config import settings
 from app.infrastructure.database.unit_of_work import AbstractUnitOfWork, SqlAlchemyUnitOfWork
+from app.infrastructure.rate_limiting import ACCOUNT_MUTATION
 from app.infrastructure.security import SecurityService
 from app.main import app
 from app.models.account_audit_event import AccountAuditEventModel
@@ -220,6 +222,39 @@ async def test_profile_update_normalizes_phone_and_records_security_history(
     assert len(events) == 1
     assert events[0].event_type == "user.profile_updated"
     assert "phone" not in events[0].payload
+
+
+async def test_profile_mutation_uses_the_authenticated_account_limit(
+    client: AsyncClient,
+    auth_service: AuthService,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, headers = await create_user(
+        session_factory,
+        auth_service,
+        email="rate-limited-profile@example.com",
+    )
+    monkeypatch.setattr(
+        settings,
+        "rate_limit_policy_overrides",
+        {f"{ACCOUNT_MUTATION}.user": {"limit": 1, "window_seconds": 60}},
+    )
+
+    first = await client.patch(
+        "/api/v1/users/me",
+        headers=headers,
+        json={"phone": "+2348111111111"},
+    )
+    second = await client.patch(
+        "/api/v1/users/me",
+        headers=headers,
+        json={"phone": "+2348222222222"},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert second.json()["error_code"] == "rate_limited"
 
 
 async def test_profile_noop_and_invalid_payloads_are_safe(

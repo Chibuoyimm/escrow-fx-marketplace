@@ -11,6 +11,7 @@ from app.models.idempotency_record import IdempotencyRecordModel
 from app.models.kyc_verification import KycVerificationModel
 from app.models.outbox_event import OutboxEventModel
 from app.models.password_reset_token import PasswordResetTokenModel
+from app.models.rate_limit_bucket import RateLimitBucketModel
 from app.models.trade_contract import TradeContractModel
 from app.models.user import UserModel
 
@@ -27,6 +28,7 @@ __all__ = [
     "IdempotencyRecordModel",
     "OutboxEventModel",
     "PasswordResetTokenModel",
+    "RateLimitBucketModel",
     "TradeContractModel",
     "UserModel",
 ]

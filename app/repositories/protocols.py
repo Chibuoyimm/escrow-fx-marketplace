@@ -22,6 +22,7 @@ from app.domain.entities import (
     KycVerification,
     OutboxEvent,
     PasswordResetToken,
+    RateLimitBucket,
     TradeContract,
     TradeContractDetails,
     User,
@@ -116,6 +117,50 @@ class IdempotencyRecordRepositoryProtocol(ABC):
     @abstractmethod
     async def delete_expired(self, *, now: datetime, limit: int) -> int:
         """Delete expired replay records for scheduled retention cleanup."""
+
+    @abstractmethod
+    async def get_completed(
+        self,
+        *,
+        principal_user_id: UUID,
+        operation_scope: str,
+        key_hash: str,
+        request_fingerprint: str,
+        now: datetime,
+    ) -> IdempotencyRecord | None:
+        """Return a still-valid exact completed record for replay preflight."""
+
+
+class RateLimitRepositoryProtocol(ABC):
+    """Atomic persistent API rate-limit counter contract."""
+
+    @abstractmethod
+    async def consume(
+        self,
+        *,
+        policy_name: str,
+        key_hash: str,
+        window_started_at: datetime,
+        expires_at: datetime,
+        limit: int,
+        now: datetime,
+    ) -> RateLimitBucket:
+        """Atomically increment or initialize one fixed-window bucket."""
+
+    @abstractmethod
+    async def get(
+        self,
+        *,
+        policy_name: str,
+        key_hash: str,
+        window_started_at: datetime,
+        now: datetime,
+    ) -> RateLimitBucket | None:
+        """Read the current window without consuming capacity."""
+
+    @abstractmethod
+    async def delete_expired(self, *, now: datetime, limit: int) -> int:
+        """Delete expired counters in a bounded batch."""
 
 
 class EmailVerificationTokenRepositoryProtocol(ABC):

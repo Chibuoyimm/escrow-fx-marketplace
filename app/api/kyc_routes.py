@@ -3,7 +3,9 @@
 from fastapi import APIRouter, Depends, status
 
 from app.api.dependencies import get_current_principal
+from app.api.rate_limiting import authenticated_rate_limit_dependency
 from app.domain.auth import AuthenticatedPrincipal
+from app.infrastructure.rate_limiting import KYC_SUBMIT
 from app.schemas.kyc import KycSubmitRequest, KycVerificationResponse
 from app.services.kyc import KycService, get_kyc_service
 
@@ -16,6 +18,7 @@ current_principal_dependency = Depends(get_current_principal)
     "/submit",
     response_model=KycVerificationResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(authenticated_rate_limit_dependency(KYC_SUBMIT))],
 )
 async def submit_kyc(
     payload: KycSubmitRequest,

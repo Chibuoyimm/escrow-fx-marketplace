@@ -1,4 +1,4 @@
-.PHONY: format lint typecheck test db-up db-down db-reset db-logs migrate run seed-reference-data expire-marketplace reconcile-kyc dispatch-notifications cleanup-idempotency
+.PHONY: format lint typecheck test db-up db-down db-reset db-logs migrate run seed-reference-data expire-marketplace reconcile-kyc dispatch-notifications cleanup-idempotency cleanup-rate-limits
 
 format:
 	.venv/bin/ruff format .
@@ -47,3 +47,6 @@ dispatch-notifications:
 
 cleanup-idempotency:
 	.venv/bin/python -m app.cleanup_idempotency
+
+cleanup-rate-limits:
+	.venv/bin/python -m app.cleanup_rate_limits

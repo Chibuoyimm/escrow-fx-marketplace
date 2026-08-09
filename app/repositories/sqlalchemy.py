@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import Select, and_, delete, or_, select, update
+from sqlalchemy import Select, and_, case, delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload, with_loader_criteria
@@ -27,6 +27,7 @@ from app.domain.entities import (
     KycVerification,
     OutboxEvent,
     PasswordResetToken,
+    RateLimitBucket,
     TradeContract,
     TradeContractDetails,
     User,
@@ -62,6 +63,7 @@ from app.models.idempotency_record import IdempotencyRecordModel
 from app.models.kyc_verification import KycVerificationModel
 from app.models.outbox_event import OutboxEventModel
 from app.models.password_reset_token import PasswordResetTokenModel
+from app.models.rate_limit_bucket import RateLimitBucketModel
 from app.models.trade_contract import TradeContractModel
 from app.models.user import UserModel
 from app.repositories.protocols import (
@@ -76,6 +78,7 @@ from app.repositories.protocols import (
     KycVerificationRepositoryProtocol,
     OutboxEventRepositoryProtocol,
     PasswordResetTokenRepositoryProtocol,
+    RateLimitRepositoryProtocol,
     TradeContractRepositoryProtocol,
     UserRepositoryProtocol,
 )
@@ -1525,11 +1528,185 @@ class SqlAlchemyIdempotencyRecordRepository(
         )
         return self._rowcount(deleted)
 
+    async def get_completed(
+        self,
+        *,
+        principal_user_id: UUID,
+        operation_scope: str,
+        key_hash: str,
+        request_fingerprint: str,
+        now: datetime,
+    ) -> IdempotencyRecord | None:
+        """Read an exact completed replay record without claiming or mutating it."""
+        statement: Select[tuple[IdempotencyRecordModel]] = select(IdempotencyRecordModel).where(
+            IdempotencyRecordModel.principal_user_id == principal_user_id,
+            IdempotencyRecordModel.operation_scope == operation_scope,
+            IdempotencyRecordModel.key_hash == key_hash,
+            IdempotencyRecordModel.request_fingerprint == request_fingerprint,
+            IdempotencyRecordModel.status == IdempotencyRecordStatus.COMPLETED,
+            IdempotencyRecordModel.expires_at > now,
+        )
+        result = await self.session.execute(statement)
+        model = result.scalar_one_or_none()
+        return model.to_domain() if model is not None else None
+
     @staticmethod
     def _as_utc(value: datetime) -> datetime:
         if value.tzinfo is None:
             return value.replace(tzinfo=UTC)
         return value.astimezone(UTC)
+
+
+class SqlAlchemyRateLimitRepository(SqlAlchemyRepository, RateLimitRepositoryProtocol):
+    """PostgreSQL-safe rate-limit bucket repository."""
+
+    async def consume(
+        self,
+        *,
+        policy_name: str,
+        key_hash: str,
+        window_started_at: datetime,
+        expires_at: datetime,
+        limit: int,
+        now: datetime,
+    ) -> RateLimitBucket:
+        """Increment a bucket with a dialect-native atomic upsert."""
+        values = {
+            "id": uuid4(),
+            "policy_name": policy_name,
+            "key_hash": key_hash,
+            "window_started_at": window_started_at,
+            "request_count": 1,
+            "expires_at": expires_at,
+            "created_at": now,
+            "updated_at": now,
+        }
+        dialect_name = self.session.bind.dialect.name if self.session.bind is not None else ""
+        dialect_insert: Any
+        if dialect_name == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert as dialect_insert
+        elif dialect_name == "sqlite":
+            from sqlalchemy.dialects.sqlite import insert as dialect_insert
+        else:
+            return await self._consume_fallback(
+                policy_name=policy_name,
+                key_hash=key_hash,
+                window_started_at=window_started_at,
+                expires_at=expires_at,
+                limit=limit,
+                now=now,
+            )
+
+        insert_statement = dialect_insert(RateLimitBucketModel).values(**values)
+        excluded = insert_statement.excluded
+        statement = insert_statement.on_conflict_do_update(
+            index_elements=[
+                RateLimitBucketModel.policy_name,
+                RateLimitBucketModel.key_hash,
+            ],
+            set_={
+                "window_started_at": excluded.window_started_at,
+                "request_count": case(
+                    (
+                        RateLimitBucketModel.window_started_at == excluded.window_started_at,
+                        case(
+                            (
+                                RateLimitBucketModel.request_count < limit + 1,
+                                RateLimitBucketModel.request_count + 1,
+                            ),
+                            else_=limit + 1,
+                        ),
+                    ),
+                    else_=1,
+                ),
+                "expires_at": excluded.expires_at,
+                "updated_at": excluded.updated_at,
+            },
+        ).returning(RateLimitBucketModel)
+        result = await self.session.execute(statement)
+        model = cast(RateLimitBucketModel, result.scalar_one())
+        return model.to_domain()
+
+    async def get(
+        self,
+        *,
+        policy_name: str,
+        key_hash: str,
+        window_started_at: datetime,
+        now: datetime,
+    ) -> RateLimitBucket | None:
+        """Read the current bucket for replay headers."""
+        statement: Select[tuple[RateLimitBucketModel]] = select(RateLimitBucketModel).where(
+            RateLimitBucketModel.policy_name == policy_name,
+            RateLimitBucketModel.key_hash == key_hash,
+            RateLimitBucketModel.window_started_at == window_started_at,
+            RateLimitBucketModel.expires_at > now,
+        )
+        result = await self.session.execute(statement)
+        model = result.scalar_one_or_none()
+        return model.to_domain() if model is not None else None
+
+    async def delete_expired(self, *, now: datetime, limit: int) -> int:
+        """Delete at most one bounded batch of expired buckets."""
+        statement = (
+            select(RateLimitBucketModel.id)
+            .where(RateLimitBucketModel.expires_at <= now)
+            .order_by(RateLimitBucketModel.expires_at.asc())
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        result = await self.session.execute(statement)
+        bucket_ids = result.scalars().all()
+        if not bucket_ids:
+            return 0
+        deleted = await self.session.execute(
+            delete(RateLimitBucketModel).where(RateLimitBucketModel.id.in_(bucket_ids))
+        )
+        return self._rowcount(deleted)
+
+    async def _consume_fallback(
+        self,
+        *,
+        policy_name: str,
+        key_hash: str,
+        window_started_at: datetime,
+        expires_at: datetime,
+        limit: int,
+        now: datetime,
+    ) -> RateLimitBucket:
+        """Use a row lock for test/unsupported dialects."""
+        statement: Select[tuple[RateLimitBucketModel]] = (
+            select(RateLimitBucketModel)
+            .where(
+                RateLimitBucketModel.policy_name == policy_name,
+                RateLimitBucketModel.key_hash == key_hash,
+            )
+            .with_for_update()
+        )
+        result = await self.session.execute(statement)
+        model = result.scalar_one_or_none()
+        if model is None:
+            model = RateLimitBucketModel(
+                id=uuid4(),
+                policy_name=policy_name,
+                key_hash=key_hash,
+                window_started_at=window_started_at,
+                request_count=1,
+                expires_at=expires_at,
+                created_at=now,
+                updated_at=now,
+            )
+            self.session.add(model)
+        elif model.window_started_at != window_started_at:
+            model.window_started_at = window_started_at
+            model.request_count = 1
+            model.expires_at = expires_at
+            model.updated_at = now
+        else:
+            model.request_count = min(model.request_count + 1, limit + 1)
+            model.updated_at = now
+        await self.session.flush()
+        return model.to_domain()
 
 
 class SqlAlchemyOutboxEventRepository(SqlAlchemyRepository, OutboxEventRepositoryProtocol):
