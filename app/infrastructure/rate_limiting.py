@@ -14,6 +14,7 @@ from enum import StrEnum
 from app.domain.exceptions import RateLimitExceededError
 from app.infrastructure.config import settings
 from app.infrastructure.exceptions import InfrastructureError
+from app.infrastructure.metrics import observe_rate_limit
 from app.services._shared import UnitOfWorkFactory, build_uow, utc_now
 
 
@@ -288,6 +289,7 @@ class RateLimitService:
         """Consume all applicable dimensions and raise a stable 429 when blocked."""
         policy = get_rate_limit_policy(policy_name)
         if not settings.rate_limit_enabled:
+            observe_rate_limit(policy.name, "disabled")
             return RateLimitDecision(limited=False, headers={})
 
         now = utc_now()
@@ -346,22 +348,29 @@ class RateLimitService:
                 headers, retry_after = _status_headers(policy, statuses, now=now)
                 if not bypass_replay:
                     await uow.commit()
-                return RateLimitDecision(
+                decision = RateLimitDecision(
                     limited=retry_after is not None and not bypass_replay,
                     headers=headers,
                     retry_after=retry_after if not bypass_replay else None,
                     bypassed_completed_replay=bypass_replay,
                 )
+                observe_rate_limit(
+                    policy.name,
+                    "rejected" if decision.limited else "allowed",
+                )
+                return decision
         except Exception as exc:
             # The limiter is an infrastructure boundary: do not expose storage
             # details, and do not let an unexpected store failure bypass the
             # configured policy decision.
             if policy.failure_mode is RateLimitFailureMode.FAIL_OPEN:
+                observe_rate_limit(policy.name, "storage_unavailable")
                 return RateLimitDecision(
                     limited=False,
                     headers={},
                     storage_unavailable=True,
                 )
+            observe_rate_limit(policy.name, "storage_unavailable")
             raise InfrastructureError(
                 title="Rate Limiting Unavailable",
                 detail="The rate-limit store could not be reached.",

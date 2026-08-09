@@ -82,6 +82,50 @@ make db-reset
 - `pytest` for tests
 - `pre-commit` for local automation
 
+## Operations And Observability
+
+Application startup configures one safe structured logger. JSON is the default;
+set `APP_LOG_FORMAT="text"` for readable local output and use
+`APP_LOG_LEVEL` to control verbosity. Every request receives a bounded,
+header-safe `X-Request-ID` or a generated UUID. Logs include that correlation
+ID, the normalized route template, status, and duration, but never request
+bodies, credentials, tokens, personal identifiers, raw IPs, query strings, or
+provider/database exception details.
+The application middleware is the canonical access log; Uvicorn access logging
+is disabled so client IPs and raw request targets are not emitted twice.
+
+Prometheus metrics are exposed at `GET /metrics` by default. Set
+`APP_METRICS_ENABLED="false"` to disable collection and exposition, or change
+`APP_METRICS_PATH` to a different path. Restrict the metrics endpoint from the
+public internet at the reverse proxy or network boundary. Metrics use only
+bounded labels such as normalized method, normalized route template, status
+class, policy, and rate-limit outcome; request IDs and object identifiers are
+never labels. The registry is process-local: multi-worker aggregation requires
+Prometheus multiprocess configuration. One-shot scheduled commands currently
+expose lifecycle through structured logs rather than API-process metrics,
+because their short-lived registries are not scrapeable by the API.
+
+Health endpoints are under the API prefix:
+
+```text
+GET /api/v1/health       legacy liveness-compatible response: {"status":"ok"}
+GET /api/v1/health/live  dependency-free liveness response
+GET /api/v1/health/ready read-only PostgreSQL readiness probe
+```
+
+Readiness returns `200 {"status":"ready"}` or a sanitized `503
+{"status":"not_ready"}`. The probe timeout is controlled by
+`APP_READINESS_TIMEOUT_SECONDS`; it never mutates database state.
+
+Scheduled commands use one shared execution wrapper for structured start and
+success/failure logs, including duration and safe exception type, plus nonzero
+failure exits:
+`dispatch_notifications`, `expire_marketplace`, `reconcile_kyc`,
+`cleanup_idempotency`, and `cleanup_rate_limits`. JSON logs and Prometheus
+metrics are provider-independent output boundaries that can later feed Sentry,
+OpenTelemetry, or a hosted metrics/logging platform without coupling the
+application to those vendors.
+
 ## Persistence
 
 - Async SQLAlchemy 2.0 for runtime persistence

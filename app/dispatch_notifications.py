@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 
+from app.infrastructure.jobs import run_cli, run_observed_job
 from app.services.notification_dispatcher import NotificationDispatchService
 
 
@@ -22,7 +22,10 @@ async def run_command(
 ) -> None:
     """Run the notification dispatch command."""
     dispatch_service = service or NotificationDispatchService()
-    result = await dispatch_service.dispatch_due(limit=limit)
+    result = await run_observed_job(
+        "dispatch_notifications",
+        lambda: dispatch_service.dispatch_due(limit=limit),
+    )
     print(
         "Notification dispatch complete: "
         f"{result.claimed} events claimed, "
@@ -38,4 +41,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_cli(main())

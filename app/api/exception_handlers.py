@@ -13,11 +13,12 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 
 from app.domain.exceptions import AppError, ErrorCode
+from app.infrastructure.application_logging import current_request_id
 from app.infrastructure.exceptions import InfrastructureError
 from app.schemas.problem import ProblemDetails
 
-logger = logging.getLogger(__name__)
 ExceptionHandler = Callable[[Request, Exception], Response | Awaitable[Response]]
+logger = logging.getLogger(__name__)
 
 
 def _request_instance(request: Request) -> str:
@@ -25,15 +26,18 @@ def _request_instance(request: Request) -> str:
 
 
 def _request_id(request: Request) -> str | None:
-    return getattr(request.state, "request_id", None)
+    return getattr(request.state, "request_id", None) or current_request_id()
 
 
 def _response(problem: ProblemDetails) -> JSONResponse:
-    return JSONResponse(
+    response = JSONResponse(
         status_code=problem.status,
         content=problem.model_dump(exclude_none=True),
         media_type="application/problem+json",
     )
+    if problem.request_id is not None:
+        response.headers["X-Request-ID"] = problem.request_id
+    return response
 
 
 async def handle_app_error(request: Request, exc: AppError) -> JSONResponse:
@@ -55,9 +59,12 @@ async def handle_app_error(request: Request, exc: AppError) -> JSONResponse:
 async def handle_infrastructure_error(request: Request, exc: InfrastructureError) -> JSONResponse:
     """Serialize infrastructure failures without leaking internals."""
     logger.warning(
-        "Infrastructure error while serving request_id=%s: %s",
-        _request_id(request),
-        exc.detail,
+        "infrastructure_error",
+        extra={
+            "event": "infrastructure_error",
+            "error_code": exc.error_code,
+            "request_id": _request_id(request),
+        },
     )
     problem = ProblemDetails(
         title=exc.title,
@@ -86,10 +93,11 @@ async def handle_validation_error(request: Request, exc: RequestValidationError)
 
 async def handle_http_exception(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     """Normalize framework HTTP exceptions into the API error format."""
+    detail = str(exc.detail) if exc.status_code < 500 else "An unexpected error occurred."
     problem = ProblemDetails(
         title="HTTP Error",
         status=exc.status_code,
-        detail=str(exc.detail),
+        detail=detail,
         instance=_request_instance(request),
         error_code=ErrorCode.INTERNAL_ERROR
         if exc.status_code >= 500
@@ -101,7 +109,14 @@ async def handle_http_exception(request: Request, exc: StarletteHTTPException) -
 
 async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
     """Return a sanitized response for unhandled exceptions."""
-    logger.exception("Unhandled exception for request_id=%s", _request_id(request), exc_info=exc)
+    logger.error(
+        "unhandled_request_error",
+        extra={
+            "event": "unhandled_request_error",
+            "exception_type": type(exc).__name__,
+            "request_id": _request_id(request),
+        },
+    )
     problem = ProblemDetails(
         title="Internal Server Error",
         status=500,

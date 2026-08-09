@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncIterator, Generator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -54,6 +55,11 @@ def assert_canonical_mutation_lock_order(
         assert ids == sorted(ids, key=lambda value: value.int)
 
 
+def record_field(record: object, name: str) -> object:
+    """Read a captured log record field without duplicating test helpers."""
+    return getattr(record, "__dict__", {}).get(name)
+
+
 @pytest.fixture
 def mutation_lock_calls(
     monkeypatch: pytest.MonkeyPatch,
@@ -91,6 +97,22 @@ def mutation_lock_calls(
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.fixture
+def app_log_capture(
+    caplog: pytest.LogCaptureFixture,
+) -> Generator[pytest.LogCaptureFixture]:
+    """Attach pytest's capture handler directly to the isolated app logger."""
+    from app.infrastructure.application_logging import configure_logging
+
+    configure_logging()
+    app_logger = logging.getLogger("app")
+    app_logger.addHandler(caplog.handler)
+    try:
+        yield caplog
+    finally:
+        app_logger.removeHandler(caplog.handler)
 
 
 @pytest.fixture(autouse=True)

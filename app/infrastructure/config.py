@@ -1,6 +1,8 @@
 """Application configuration."""
 
-from pydantic import Field
+from typing import Literal
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,6 +12,11 @@ class Settings(BaseSettings):
     app_name: str = "Escrow FX Marketplace API"
     api_v1_prefix: str = "/api/v1"
     debug: bool = False
+    log_level: str = "INFO"
+    log_format: Literal["json", "text"] = "json"
+    metrics_enabled: bool = True
+    metrics_path: str = "/metrics"
+    readiness_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
     database_url: str = (
         "postgresql+asyncpg://postgres:postgres@localhost:5433/escrow_fx_marketplace"
     )
@@ -59,6 +66,35 @@ class Settings(BaseSettings):
         env_prefix="APP_",
         extra="ignore",
     )
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def normalize_log_level(cls, value: object) -> str:
+        """Normalize configured levels before the logging module consumes them."""
+        normalized = str(value).upper()
+        if normalized not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
+            raise ValueError("APP_LOG_LEVEL must be a standard Python logging level.")
+        return normalized
+
+    @field_validator("metrics_path")
+    @classmethod
+    def validate_metrics_path(cls, value: str) -> str:
+        """Require a path-only metrics endpoint."""
+        if (
+            len(value) > 128
+            or not value.startswith("/")
+            or value == "/"
+            or "//" in value
+            or any(
+                character.isspace() or ord(character) < 32 or ord(character) == 127
+                for character in value
+            )
+            or any(character in value for character in "?#{}")
+        ):
+            raise ValueError(
+                "APP_METRICS_PATH must be a bounded absolute path without dynamic segments."
+            )
+        return value.rstrip("/") or "/"
 
 
 settings = Settings()

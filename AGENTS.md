@@ -31,15 +31,28 @@ Keep transport concerns in `api`, persistence details in repositories/models, an
 
 ## Current Next Work
 
-Near-term backend priorities:
+The provider-independent observability and operational-hardening milestone is
+implemented. Near-term backend priorities are now the deferred integration and
+deployment work:
 
-- continue account/auth hardening where useful
-- continue marketplace lifecycle work before funding is introduced
-- keep notification workflows aligned with new business events
-- keep KYC provider integration flexible until Youverify account access confirms exact products and pricing
-- update this file when a decision becomes project guidance rather than a one-off implementation detail
+- integrate Youverify after account access confirms exact products and pricing
+- design payment/escrow infrastructure, ledgers, funding, and payout rails
+- prepare deployment configuration, secret management, and scheduler topology
+- keep this file updated when a decision becomes project guidance rather than a one-off implementation detail
 
 Funding, escrow legs, ledgers, payout rails, and payment webhooks remain deferred until explicitly picked up.
+
+## Observability Decisions
+
+- `app/infrastructure/application_logging.py` owns logging configuration, safe field allowlisting, and the request correlation context. Do not add route-specific logging wrappers or log arbitrary exception messages.
+- The application request middleware is the canonical access log; `uvicorn.access` is intentionally disabled because its default records expose client IPs and raw request targets.
+- `app/infrastructure/request_context.py` is the one HTTP middleware. It validates or generates `X-Request-ID`, emits one completion event, and records HTTP metrics. Do not add a second correlation or metrics middleware.
+- `app/infrastructure/metrics.py` owns one process-wide Prometheus registry and all metric collectors. Add instrumentation at shared boundaries, not in every route.
+- `app/infrastructure/health.py` owns the read-only readiness probe. `/api/v1/health` remains backward compatible; `/api/v1/health/live` is dependency-free and `/api/v1/health/ready` checks PostgreSQL with a bounded timeout.
+- `app/infrastructure/jobs.py` owns scheduled-command lifecycle logging and failure exit handling. One-shot job metrics are intentionally not registered because they are not visible from the API process; feature jobs should provide only their operation and human-readable success output.
+- Fixed-cardinality labels are required. Never label metrics or logs with request IDs, user IDs, email addresses, tokens, raw paths, query strings, KYC identifiers, or provider/database error text.
+- `/metrics` is process-local and currently covers HTTP and rate-limit metrics. Multi-worker aggregation requires Prometheus multiprocess configuration; do not add Pushgateway or vendor telemetry code without a separate decision. Unexpected exception logs include only a safe exception type and correlation ID, never tracebacks or exception details.
+- No Sentry, OpenTelemetry, Redis, Kafka, or vendor observability SDK is part of this milestone. JSON logs and Prometheus exposition are the integration boundaries.
 
 ## Account Management Decisions
 
@@ -89,6 +102,7 @@ make expire-marketplace
 make reconcile-kyc
 make dispatch-notifications
 make cleanup-idempotency
+make cleanup-rate-limits
 make run
 ```
 

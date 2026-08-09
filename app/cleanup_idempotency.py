@@ -1,6 +1,7 @@
 """Delete expired mutation idempotency records."""
 
 from app.infrastructure.config import settings
+from app.infrastructure.jobs import run_cli, run_observed_job
 from app.services._shared import build_uow, utc_now
 
 
@@ -16,11 +17,12 @@ async def cleanup_expired_idempotency_records() -> int:
 
 
 async def _main() -> None:
-    deleted = await cleanup_expired_idempotency_records()
+    deleted = await run_observed_job(
+        "cleanup_idempotency",
+        cleanup_expired_idempotency_records,
+    )
     print(f"Deleted {deleted} expired idempotency record(s).")
 
 
 if __name__ == "__main__":
-    import asyncio
-
-    asyncio.run(_main())
+    run_cli(_main())

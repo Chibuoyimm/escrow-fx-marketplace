@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 
 from app.infrastructure.config import settings
+from app.infrastructure.jobs import run_cli, run_observed_job
 from app.services.kyc import KycService
 
 
@@ -21,16 +21,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-async def run(limit: int) -> None:
+async def run(limit: int, service: KycService | None = None) -> None:
     """Run one KYC reconciliation pass."""
-    completed = await KycService().reconcile_pending(limit=limit)
+    kyc_service = service or KycService()
+    completed = await run_observed_job(
+        "reconcile_kyc",
+        lambda: kyc_service.reconcile_pending(limit=limit),
+    )
     print(f"KYC reconciliation complete: {completed} verifications completed.")
 
 
 def main() -> None:
     """Run the KYC reconciliation command."""
     args = parse_args()
-    asyncio.run(run(args.limit))
+    run_cli(run(args.limit))
 
 
 if __name__ == "__main__":

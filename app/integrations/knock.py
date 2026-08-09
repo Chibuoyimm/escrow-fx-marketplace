@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol
 from uuid import UUID
@@ -19,8 +18,6 @@ from app.services.notification_preferences import (
     NotificationPreferenceGateway,
     NotificationPreferenceState,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class KnockClientProtocol(Protocol):
@@ -266,47 +263,21 @@ async def _provider_call(
     except knockapi.NotFoundError:
         if missing_ok:
             return None
-        raise _provider_infrastructure_error(status_code=404, request_id=None) from None
-    except knockapi.APIStatusError as exc:
-        raise _provider_infrastructure_error(
-            status_code=exc.status_code,
-            request_id=_provider_request_id(exc),
-        ) from None
+        raise _provider_infrastructure_error() from None
+    except knockapi.APIStatusError:
+        raise _provider_infrastructure_error() from None
     except knockapi.APIConnectionError:
-        raise _provider_infrastructure_error(
-            status_code=None,
-            request_id=None,
-        ) from None
-    except Exception as exc:  # noqa: BLE001 - provider failures need one safe API error.
-        logger.warning("Knock preference operation failed exception_type=%s", type(exc).__name__)
-        raise _provider_infrastructure_error(status_code=None, request_id=None) from None
+        raise _provider_infrastructure_error() from None
+    except Exception:  # noqa: BLE001 - provider failures need one safe API error.
+        raise _provider_infrastructure_error() from None
 
 
-def _provider_infrastructure_error(
-    *,
-    status_code: int | None,
-    request_id: str | None,
-) -> InfrastructureError:
+def _provider_infrastructure_error() -> InfrastructureError:
     """Create the sanitized infrastructure error used by API handlers."""
-    logger.warning(
-        "Knock preference operation failed status_code=%s provider_request_id=%s",
-        status_code,
-        request_id,
-    )
     return InfrastructureError(
         title="Notification Provider Error",
         detail="The Knock notification provider request failed.",
     )
-
-
-def _provider_request_id(exc: knockapi.APIStatusError) -> str | None:
-    """Extract only a safe provider request identifier for server logs."""
-    response = getattr(exc, "response", None)
-    headers = getattr(response, "headers", None)
-    if headers is None:
-        return None
-    request_id = headers.get("x-request-id") or headers.get("request-id")
-    return request_id if isinstance(request_id, str) else None
 
 
 def _preference_state(preference_set: Any, fallback_id: str) -> NotificationPreferenceState:

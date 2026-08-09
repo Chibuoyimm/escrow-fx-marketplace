@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 
+from app.infrastructure.jobs import run_cli, run_observed_job
 from app.services.marketplace_expiry import MarketplaceExpiryService
 
 
@@ -16,7 +16,10 @@ def build_parser() -> argparse.ArgumentParser:
 async def run_command(service: MarketplaceExpiryService | None = None) -> None:
     """Run the marketplace expiry command."""
     expiry_service = service or MarketplaceExpiryService()
-    result = await expiry_service.expire_due_items()
+    result = await run_observed_job(
+        "expire_marketplace",
+        expiry_service.expire_due_items,
+    )
     print(
         "Marketplace expiry complete: "
         f"{result.expired_requests} requests expired, "
@@ -33,4 +36,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_cli(main())

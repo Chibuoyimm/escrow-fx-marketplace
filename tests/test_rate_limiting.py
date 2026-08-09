@@ -11,6 +11,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.domain.enums import UserStatus
+from app.domain.exceptions import RateLimitExceededError
 from app.infrastructure.config import settings
 from app.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 from app.infrastructure.exceptions import InfrastructureError
@@ -18,6 +19,7 @@ from app.infrastructure.idempotency import (
     build_idempotency_fingerprint,
     hash_idempotency_key,
 )
+from app.infrastructure.metrics import REGISTRY
 from app.infrastructure.rate_limiting import (
     AUTH_LOGIN,
     MARKETPLACE_MUTATION,
@@ -358,3 +360,44 @@ def test_policy_overrides_are_validated(monkeypatch: pytest.MonkeyPatch) -> None
     )
     with pytest.raises(ValueError):
         get_rate_limit_policy(AUTH_LOGIN)
+
+
+async def test_rate_limit_metrics_record_rejection_and_storage_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "metrics_enabled", True)
+    set_policy_overrides(
+        monkeypatch,
+        **{
+            f"{AUTH_LOGIN}.ip": {"limit": 1, "window_seconds": 60},
+            f"{AUTH_LOGIN}.account": {"limit": 100, "window_seconds": 60},
+        },
+    )
+    service = RateLimitService(uow_factory=lambda: SqlAlchemyUnitOfWork(session_factory))
+    labels = {"policy": AUTH_LOGIN, "outcome": "rejected"}
+    before_rejected = float(REGISTRY.get_sample_value("rate_limit_decisions_total", labels) or 0)
+
+    await service.enforce_or_raise(policy_name=AUTH_LOGIN, identities={"ip": "192.0.2.20"})
+    with pytest.raises(RateLimitExceededError):
+        await service.enforce_or_raise(policy_name=AUTH_LOGIN, identities={"ip": "192.0.2.20"})
+
+    assert float(REGISTRY.get_sample_value("rate_limit_decisions_total", labels) or 0) == (
+        before_rejected + 1
+    )
+
+    def broken_factory() -> Any:
+        raise RuntimeError("database unavailable")
+
+    storage_labels = {"policy": AUTH_LOGIN, "outcome": "storage_unavailable"}
+    before_storage = float(
+        REGISTRY.get_sample_value("rate_limit_decisions_total", storage_labels) or 0
+    )
+    with pytest.raises(InfrastructureError):
+        await RateLimitService(uow_factory=broken_factory).enforce_or_raise(
+            policy_name=AUTH_LOGIN,
+            identities={"ip": "192.0.2.21"},
+        )
+    assert float(REGISTRY.get_sample_value("rate_limit_decisions_total", storage_labels) or 0) == (
+        before_storage + 1
+    )

@@ -35,6 +35,10 @@ def build_test_app() -> FastAPI:
     async def http_error() -> None:
         raise HTTPException(status_code=412, detail="precondition failed")
 
+    @application.get("/http-server-error")
+    async def http_server_error() -> None:
+        raise HTTPException(status_code=500, detail="database password=secret")
+
     return application
 
 
@@ -81,14 +85,36 @@ def test_http_exceptions_are_normalized() -> None:
     assert response.json()["detail"] == "precondition failed"
 
 
+def test_http_server_errors_are_sanitized() -> None:
+    client = TestClient(build_test_app(), raise_server_exceptions=False)
+
+    response = client.get("/http-server-error")
+
+    assert response.status_code == 500
+    assert response.headers["x-request-id"] == response.json()["request_id"]
+    assert response.json()["detail"] == "An unexpected error occurred."
+    assert "secret" not in response.text
+
+
 def test_unexpected_errors_are_sanitized() -> None:
+    client = TestClient(build_test_app(), raise_server_exceptions=False)
+
+    response = client.get("/unexpected", headers={"X-Request-ID": "safe-error-id"})
+
+    assert response.status_code == 500
+    assert response.headers["x-request-id"] == "safe-error-id"
+    assert response.json()["error_code"] == "internal_error"
+    assert response.json()["detail"] == "An unexpected error occurred."
+
+
+def test_unexpected_error_generates_the_same_request_id_in_body_and_header() -> None:
     client = TestClient(build_test_app(), raise_server_exceptions=False)
 
     response = client.get("/unexpected")
 
     assert response.status_code == 500
-    assert response.json()["error_code"] == "internal_error"
-    assert response.json()["detail"] == "An unexpected error occurred."
+    assert response.headers["x-request-id"] == response.json()["request_id"]
+    assert len(response.headers["x-request-id"]) == 36
 
 
 def test_normal_responses_include_request_id_header() -> None:

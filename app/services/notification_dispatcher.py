@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -11,6 +12,8 @@ from app.domain.entities import OutboxEvent
 from app.domain.enums import OutboxEventStatus
 from app.infrastructure.config import settings
 from app.services._shared import UnitOfWorkFactory, build_uow, utc_now
+
+logger = logging.getLogger(__name__)
 
 
 class NotificationProvider(Protocol):
@@ -25,9 +28,9 @@ class LoggingNotificationProvider:
 
     async def send(self, event: OutboxEvent) -> None:
         """Pretend to deliver an event while keeping local dispatch usable."""
-        print(
-            "Notification dispatched: "
-            f"{event.event_type} event_id={event.id} recipient_user_id={event.recipient_user_id}"
+        logger.info(
+            "notification_dispatched",
+            extra={"event": "notification_dispatched", "outcome": "success"},
         )
 
 
