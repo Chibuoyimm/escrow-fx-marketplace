@@ -6,6 +6,10 @@ Guidance for coding agents working in this repository.
 
 This is a backend-only FastAPI project for an escrow foreign-exchange marketplace. Do not introduce frontend application work into this repo.
 
+The implemented Next.js frontend is in the sibling repository
+`/Users/chibuoyim/Code/escrow-fx-marketplace-web`. Coordinate API-contract
+changes with its generated schema and callers; frontend code belongs there.
+
 Correct local repo path:
 
 ```text
@@ -175,14 +179,14 @@ Nigeria KYC has a provider-ready backend foundation.
 - Each request can have at most one direct successor, recorded by
   `relisted_from_request_id`; a successor can itself be relisted once after it
   reaches a terminal state.
-- Marketplace and admin list endpoints use `{items, next_cursor}` cursor pagination, ordered by `created_at` and ID. This is an intentional v1 breaking contract change because no frontend/client exists yet; do not add duplicate legacy list endpoints.
+- Marketplace and admin list endpoints use `{items, next_cursor}` cursor pagination, ordered by `created_at` and ID. This is the established v1 contract consumed by the sibling frontend; do not add duplicate legacy list endpoints or assume contract changes have no callers.
 - Creation-date filters are inclusive (`created_from` and `created_to`), and
   values are normalized to UTC before comparison. Invalid lower/upper ranges
   are domain validation errors.
 - Offer history responses include request status, currency codes, request amount,
   preferred rate, and request expiry, without exposing request-owner private data.
 - Request and offer mutations use explicit `SELECT FOR UPDATE` repository
-  methods. Request-row locks are acquired before offer-row locks for offer
+  methods. Lock participant users in UUID order first, then request rows before offer rows for offer
   edits, withdrawal, rejection, and acceptance. Expiry updates retain terminal
   status predicates so they cannot overwrite accepted or locked transitions.
 - An offer PATCH with the existing rate is a no-op: it does not change
@@ -333,6 +337,10 @@ After the outbox publisher refactor, a live smoke test confirmed:
 - `make dispatch-notifications` delivers the event
 - the real reset email lands in Gmail
 
+These are historical checks, not evidence for every later revision. Reverify
+affected boundaries when wiring, payloads, provider configuration, or auth
+behavior changes, and identify the revision/environment actually exercised.
+
 ## Integration Boundaries
 
 Keep provider-specific code out of business services.
@@ -367,6 +375,20 @@ replay behavior is covered with SQLite API/repository tests, and the opt-in
 PostgreSQL suite includes a concurrent duplicate request race that asserts one
 marketplace row and one outbox event.
 
+Run `tests/test_postgres_concurrency.py` only with
+`TEST_POSTGRES_DATABASE_URL` pointing to a dedicated disposable database: its
+fixture creates application tables and drops them on teardown. Never point it
+at the ordinary local application database or shared dev/prod data. The suite
+also covers token single-use races, account/KYC concurrency, rate limits, and
+outbox lease ownership; it does not establish every marketplace race or a
+current deployed-environment result.
+
+For browser-to-backend E2E, use the sibling frontend connected to the actual
+FastAPI server and PostgreSQL. Its default Playwright suite uses a mock backend
+on port `4010`, so that suite alone does not verify this integration. Check the
+effective frontend backend URL and the request reaching FastAPI. Actual email
+delivery requires provider/inbox evidence beyond an accepted outbox trigger.
+
 ## Current Product Gaps
 
 Known deferred work:
@@ -379,7 +401,12 @@ Known deferred work:
 - ledger accounting
 - in-app notifications
 - compliance/risk automation
-- frontend verification/reset pages
+
+Email verification and password-reset pages are implemented in the sibling
+frontend at `/verify-email` and `/reset-password`. Verification posts through
+its `/api/session/verify-email` route to backend
+`POST /api/v1/auth/verify-email`; password reset uses the frontend BFF to call
+`POST /api/v1/auth/reset-password`.
 
 ## Working Lessons
 
